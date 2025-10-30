@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Large logs (keep important evaluation logs)
+*.log
+
+# Large CSV files (keep evaluation manifests and important results)
+*.csv
+!data/evaluation_manifest*.csv
+!data/*.txt
+
+# Model repos (large)
+chexagent_repo/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
