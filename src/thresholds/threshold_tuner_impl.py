@@ -143,7 +143,7 @@ def tune_thresholds(csv_path: str,
     # Minimum threshold floor to avoid overly permissive thresholds
     # (many binary scores cluster at 0.20 from negative parsing, causing optimizer to pick low thresholds)
     MIN_THRESHOLD_FLOOR = 0.30
-    
+
     if mode == "fbeta":
         for L in labels:
             y_true = df[f"y_true_{L}"].values.astype(int)

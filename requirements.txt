@@ -8,6 +8,8 @@ einops>=0.6.0
 sentencepiece>=0.1.99
 protobuf>=3.20.0
 pyarrow>=10.0.0
+torchvision>=0.15.0
+torchxrayvision>=1.0.1
 
 # Image processing
 albumentations>=1.3.0

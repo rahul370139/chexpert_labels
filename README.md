@@ -1,101 +1,89 @@
-# CheXpert Label Evaluation with CheXagent
+# CheXpert Label Evaluation
 
-This repository contains scripts for evaluating CheXagent model performance on CheXpert label prediction using a hybrid ensemble approach.
+Ensemble pipeline combining CheXagent (text reasoning) + TorchXRayVision (continuous probabilities) for CheXpert label prediction with calibration and threshold optimization.
 
-## Overview
-
-The project implements a probability-driven hybrid pipeline that combines:
-- **Binary Disease Classification**: 13 binary calls per image (Yes/No for each CheXpert label)
-- **Disease Identification**: Narrative text analysis for verification and rescue
-- **Per-Class Threshold Tuning**: Data-driven threshold optimization for each disease
-
-## Key Features
-
-- **Smart Ensemble Pipeline**: Combines binary classification and disease identification
-- **Precision-First Threshold Tuning**: Optimizes thresholds per disease with medical AI considerations
-- **Comprehensive Evaluation**: Detailed per-disease and overall performance metrics
-- **Ground Truth Manifest Creation**: Balanced dataset sampling from curriculum data
-
-## Repository Structure
+## 📁 Repository Structure
 
 ```
-├── smart_ensemble.py                    # Main hybrid ensemble prediction script
-├── evaluate_results.py                  # Comprehensive evaluation and threshold tuning
-├── calculate_performance_detailed.py    # Detailed per-disease performance report
-├── create_ground_truth_manifest.py     # Generate balanced ground truth datasets
-├── threshold_tuner.py                   # CLI for principled threshold tuning
-├── threshold_tuner_impl.py             # Core threshold tuning logic (F-beta, min-precision)
-├── prepare_for_threshold_tuning.py     # Data preparation for threshold tuning
-├── infer_with_chexagent_class.py       # Basic CheXagent inference
-├── config/
-│   └── label_thresholds.json           # Per-disease thresholds (tuned)
-├── data/
-│   ├── evaluation_manifest_1000.csv    # Ground truth for 1000 images
-│   └── image_list_*.txt                # Image path lists
-└── README.md                            # This file
+├── src/                           # All source code
+│   ├── inference/                # Core inference scripts
+│   │   ├── smart_ensemble.py    # CheXagent hybrid ensemble
+│   │   ├── txr_infer.py         # TorchXRayVision DenseNet
+│   │   └── infer_with_chexagent_class.py
+│   ├── calibration/              # Probability calibration
+│   │   ├── fit_label_calibrators.py
+│   │   └── apply_label_calibrators.py
+│   ├── thresholds/               # Threshold optimization
+│   │   ├── threshold_tuner.py
+│   │   └── threshold_tuner_impl.py
+│   ├── evaluation/               # Evaluation scripts
+│   │   ├── evaluate_prob_predictions.py
+│   │   ├── evaluate_against_phaseA.py
+│   │   └── evaluate_results.py
+│   ├── data_prep/                # Data preparation utilities
+│   │   ├── patient_wise_split.py
+│   │   ├── prepare_for_threshold_tuning.py
+│   │   ├── prepare_predictions_for_calibration.py
+│   │   └── create_ground_truth_*.py
+│   ├── pipelines/                # End-to-end orchestrators
+│   │   ├── run_txr_pipeline.py
+│   │   └── run_full_ensemble_pipeline.py
+│   └── utils/                    # Utility scripts
+│       ├── blend_probabilities.py
+│       └── redecide_with_precision_gating.py
+├── config/                       # Configuration files
+│   ├── label_thresholds.json    # Per-disease thresholds
+│   └── platt_params.json        # Calibration parameters
+├── data/                         # Data files
+│   ├── evaluation_manifest_*.csv
+│   └── image_list_*.txt
+├── results/                      # Output files (CSVs, logs)
+├── docs/                         # Documentation
+└── scripts/archive/              # Old/test scripts
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
-### Installation
+### Full Ensemble Pipeline (TXR + CheXagent)
 
 ```bash
-pip install -r requirements.txt
+# From project root
+python src/pipelines/run_full_ensemble_pipeline.py
 ```
 
-### Running Evaluation
+### Individual Components
 
-1. **Create ground truth manifest**:
 ```bash
-python create_ground_truth_manifest.py \
-    --input curriculum_train_final_clean.jsonl \
-    --output data/evaluation_manifest_1000.csv \
-    --n_samples 1000
+# TXR inference
+python src/inference/txr_infer.py \
+  --images data/image_list.txt \
+  --out_csv results/txr_preds.csv \
+  --device mps
+
+# CheXagent inference
+python src/inference/smart_ensemble.py \
+  --images data/image_list.txt \
+  --out_csv results/chex_preds.csv \
+  --device mps \
+  --thresholds config/label_thresholds.json
+
+# Blend probabilities
+python src/utils/blend_probabilities.py \
+  --predictions results/txr_preds.csv,0.6 \
+  --predictions results/chex_preds.csv,0.4 \
+  --out_csv results/ensemble_preds.csv
 ```
 
-2. **Run smart ensemble predictions**:
-```bash
-python smart_ensemble.py \
-    --images data/image_list_1000_absolute.txt \
-    --out_csv predictions_1000.csv \
-    --device mps  # or cuda, cpu
-```
+## 🔑 Key Features
 
-3. **Evaluate and tune thresholds**:
-```bash
-python evaluate_results.py \
-    --predictions predictions_1000.csv \
-    --ground_truth data/evaluation_manifest_1000.csv \
-    --precision_target 0.70
-```
+- **Continuous Probabilities**: TXR provides smooth scores (0.0-1.0), not just 0.20/0.80
+- **Calibration**: Platt scaling per-label for calibrated probabilities
+- **Precision-First Tuning**: F-beta optimization with medical AI considerations
+- **Ensemble Blending**: Per-label logistic regression combining TXR + CheXagent
+- **NaN Handling**: CheXagent fills gaps where TXR doesn't output (Pleural Other, Support Devices, No Finding)
 
-4. **Get detailed performance report**:
-```bash
-python calculate_performance_detailed.py
-```
+## 📚 Documentation
 
-## Threshold Tuning
-
-The system uses a two-stage approach:
-
-1. **Principled Tuning** (F-beta or min-precision): Data-driven optimization from precision-recall curves
-2. **Legacy Fallback** (Precision-first): Used when principled tuning produces uniform thresholds due to score clustering
-
-See [README_thresholds.md](README_thresholds.md) for detailed documentation.
-
-## Key Results
-
-With per-class optimized thresholds (as of latest evaluation):
-
-- **Macro F1-Score**: 0.352 (CHEXPERT14)
-- **Micro F1-Score**: 0.418 (CHEXPERT14)
-- **Top Performers**: Support Devices (F1=0.740), Pleural Effusion (F1=0.702), Edema (F1=0.563)
-
-## Documentation
-
-- [README_thresholds.md](README_thresholds.md): Threshold tuning utility documentation
-- [THRESHOLD_TUNING_INTEGRATION.md](THRESHOLD_TUNING_INTEGRATION.md): Integration details
-
-## License
-
-See LICENSE file for details.
+See `docs/` for detailed workflows:
+- `CALIBRATION_WORKFLOW.md` - Calibration pipeline guide
+- `README_thresholds.md` - Threshold tuning documentation

@@ -283,6 +283,12 @@ def recommend_thresholds_principled(
     Returns:
         Dict with thresholds (for 13 CheXpert labels, excluding No Finding) and metrics
     """
+    import sys
+    from pathlib import Path
+    # Add thresholds directory to path for imports
+    thresholds_dir = Path(__file__).parent.parent / "thresholds"
+    if str(thresholds_dir) not in sys.path:
+        sys.path.insert(0, str(thresholds_dir))
     from threshold_tuner_impl import tune_thresholds
     
     if output_config is None:

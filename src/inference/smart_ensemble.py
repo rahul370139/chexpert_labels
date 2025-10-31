@@ -3,14 +3,17 @@ Smart Ensemble: hybrid CheXagent inference with per-label thresholds.
 
 This flow always collects binary predictions, derives calibrated scores,
 and optionally rescues under-called labels using disease_identification text.
+
+NEW: Supports Platt calibration + precision-first gating (HARD vs EASY labels).
 """
 
 import csv
 import json
 import re
 import sys
+import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # Add chexagent_repo to path
 sys.path.insert(0, str(Path(__file__).parent / "chexagent_repo"))
@@ -49,14 +52,22 @@ DEFAULT_THRESHOLDS = {
     "Support Devices": 0.60,
 }
 
-# Labels where strong DI evidence can upgrade a binary negative decision.
-DI_BOOST_LABELS = {"Edema", "Pleural Effusion", "Pleural Other"}
+# Precision-first label grouping (based on evaluation results)
+# HARD: labels with chronic FP issues → require DI confirmation (AND gating)
+# EASY: labels with good precision → allow DI boost (OR gating)
+HARD_LABELS = {
+    "Fracture", "Lung Lesion", "Pleural Other", 
+    "Consolidation", "Pneumonia", "Enlarged Cardiomediastinum"
+}
+EASY_LABELS = {
+    "Pleural Effusion", "Edema", "Lung Opacity", 
+    "Support Devices", "Pneumothorax", "Cardiomegaly", "Atelectasis"
+}
 
 # Precision-oriented policy knobs
 CONF_MARGIN = 0.05              # require score >= tau + margin for direct binary positives
 DI_STRICT_STRENGTH = 0.70       # minimum DI strength for any rescue
 DI_BORDERLINE_WINDOW = 0.15     # only allow DI rescue if |score - tau| <= window
-DI_DISABLED = {"Pleural Other"} # optional: disable DI boost for problematic label(s)
 
 # Disease-specific confidence margins (higher = more conservative, fewer false positives)
 # Reduced slightly to balance precision/recall better
@@ -87,6 +98,29 @@ def load_thresholds(threshold_path: Path) -> Dict[str, float]:
         except json.JSONDecodeError:
             print(f"⚠️  Failed to parse thresholds at {threshold_path}, falling back to defaults.")
     return DEFAULT_THRESHOLDS.copy()
+
+
+def load_calibration(calib_path: Optional[Path]) -> Optional[Dict[str, Dict[str, float]]]:
+    """Load Platt calibration parameters (a, b) per label."""
+    if not calib_path or not calib_path.exists():
+        return None
+    try:
+        data = json.loads(calib_path.read_text())
+        print(f"✅ Loaded Platt calibration from {calib_path}")
+        return data
+    except json.JSONDecodeError:
+        print(f"⚠️  Failed to parse calibration at {calib_path}")
+        return None
+
+
+def apply_calibration(score: float, label: str, calib_params: Optional[Dict]) -> float:
+    """Apply Platt calibration: P(y=1|s) = 1 / (1 + exp(-(a*s + b)))"""
+    if not calib_params or label not in calib_params:
+        return score
+    a = calib_params[label]["a"]
+    b = calib_params[label]["b"]
+    calibrated = 1.0 / (1.0 + np.exp(-(a * score + b)))
+    return float(np.clip(calibrated, 0.0, 1.0))
 
 
 def parse_numeric_scores(text: str) -> List[float]:
@@ -243,10 +277,19 @@ def decide_label(
     binary_score: float,
     thresholds: Dict[str, float],
     di_entry: Dict[str, float],
+    use_precision_gating: bool = False,
 ) -> Tuple[int, List[str]]:
+    """
+    Decide final label with optional precision-first gating.
+    
+    Args:
+        disease: Disease label
+        binary_score: Calibrated binary score (0-1)
+        thresholds: Per-label thresholds
+        di_entry: DI parsing result
+        use_precision_gating: If True, use HARD/EASY label logic
+    """
     tau = thresholds.get(disease, 0.5)
-    # Use disease-specific margin if available, otherwise default
-    margin = DISEASE_CONF_MARGINS.get(disease, CONF_MARGIN)
     reasons: List[str] = []
     decision = 0
 
@@ -256,61 +299,126 @@ def decide_label(
         reasons.append("di_negation")
         return decision, reasons
 
-    # Direct binary positive requires disease-specific confidence margin
-    required_score = tau + margin
-    if binary_score >= required_score:
-        decision = 1
-        reasons.append("binary_strong")
-        return decision, reasons
+    # Get DI signal strength
+    di_mentioned = di_entry.get("mentioned", False)
+    di_strength = float(di_entry.get("strength", 0.0))
+    di_uncertain = di_entry.get("uncertain", False)
+    di_strong = di_mentioned and not di_uncertain and di_strength >= DI_STRICT_STRENGTH
 
-    # Borderline region logic
-    # Case A: borderline positive (tau <= score < tau + margin) → require stronger DI
-    if tau <= binary_score < required_score:
-        if (
-            disease in DI_BOOST_LABELS
-            and disease not in DI_DISABLED
-            and not di_entry.get("uncertain")
-            and di_entry.get("mentioned")
-            and float(di_entry.get("strength", 0.0)) >= DI_STRICT_STRENGTH
-        ):
-            decision = 1
-            reasons.append("borderline+di_strong")
-            return decision, reasons
+    if use_precision_gating:
+        # NEW: Precision-first gating based on label difficulty
+        t_hi = tau
+        t_lo = 0.5 * t_hi  # Gray zone threshold
+        
+        if disease in HARD_LABELS:
+            # HARD labels: require DI confirmation (AND gating)
+            if binary_score >= t_hi:
+                if di_strong:
+                    decision = 1
+                    reasons.append("hard_binary_high+di_confirm")
+                else:
+                    # Allow direct positive only if score is very high
+                    margin = DISEASE_CONF_MARGINS.get(disease, CONF_MARGIN)
+                    if binary_score >= t_hi + margin:
+                        decision = 1
+                        reasons.append("hard_binary_very_high")
+                    else:
+                        decision = 0
+                        reasons.append("hard_no_di_confirmation")
+            elif t_lo <= binary_score < t_hi:
+                # Gray zone: require strong DI
+                if di_strong:
+                    decision = 1
+                    reasons.append("hard_gray_zone+di_rescue")
+                else:
+                    decision = 0
+                    reasons.append("hard_gray_zone_no_di")
+            else:
+                decision = 0
+                reasons.append("hard_below_threshold")
+        
+        elif disease in EASY_LABELS:
+            # EASY labels: allow DI boost (OR gating)
+            if binary_score >= t_hi:
+                decision = 1
+                reasons.append("easy_binary_high")
+            elif t_lo <= binary_score < t_hi:
+                # Gray zone: DI can rescue
+                if di_strong:
+                    decision = 1
+                    reasons.append("easy_gray_zone+di_rescue")
+                else:
+                    decision = 0
+                    reasons.append("easy_gray_zone_no_di")
+            elif di_strong:
+                # Below threshold but strong DI can rescue
+                decision = 1
+                reasons.append("easy_di_rescue")
+            else:
+                decision = 0
+                reasons.append("easy_below_threshold")
+        
         else:
-            reasons.append("borderline_insufficient_evidence")
-            return 0, reasons
-
-    # Case B: binary below tau. Only allow rescue if close and DI very strong
-    # Use tighter window for low-precision diseases
-    rescue_window = DI_BORDERLINE_WINDOW if margin <= CONF_MARGIN else (DI_BORDERLINE_WINDOW * 0.8)
-    if (tau - rescue_window) <= binary_score < tau:
-        if (
-            disease in DI_BOOST_LABELS
-            and disease not in DI_DISABLED
-            and not di_entry.get("uncertain")
-            and di_entry.get("mentioned")
-            and float(di_entry.get("strength", 0.0)) >= DI_STRICT_STRENGTH
-        ):
+            # Fallback for unlabeled diseases (shouldn't happen)
+            decision = 1 if binary_score >= tau else 0
+            reasons.append("unlabeled_fallback")
+    
+    else:
+        # LEGACY: Original logic with confidence margins
+        margin = DISEASE_CONF_MARGINS.get(disease, CONF_MARGIN)
+        required_score = tau + margin
+        
+        if binary_score >= required_score:
             decision = 1
-            reasons.append("rescue_di_strong")
-            return decision, reasons
+            reasons.append("binary_strong")
+        elif tau <= binary_score < required_score:
+            # Borderline: allow DI boost for EASY labels only
+            if disease in EASY_LABELS and di_strong:
+                decision = 1
+                reasons.append("borderline+di_boost")
+            else:
+                decision = 0
+                reasons.append("borderline_insufficient")
+        elif (tau - DI_BORDERLINE_WINDOW) <= binary_score < tau:
+            # Near miss: allow DI rescue for EASY labels
+            if disease in EASY_LABELS and di_strong:
+                decision = 1
+                reasons.append("rescue_di_strong")
+            else:
+                decision = 0
+                reasons.append("below_tau_close")
         else:
-            reasons.append("below_tau_close")
-            return 0, reasons
+            decision = 0
+            reasons.append("below_tau")
 
-    # Case C: safely below tau → negative
-    reasons.append("below_tau")
-    return 0, reasons
+    return decision, reasons
 
 
 def smart_ensemble_prediction(
     image_paths: List[Path],
     device: str = "mps",
     thresholds: Dict[str, float] = None,
+    calibration_params: Optional[Dict[str, Dict[str, float]]] = None,
+    use_precision_gating: bool = False,
 ) -> List[Dict[str, object]]:
+    """
+    Run CheXagent inference with optional calibration and precision gating.
+    
+    Args:
+        image_paths: List of image paths
+        device: Device for CheXagent ('mps', 'cuda', or 'cpu')
+        thresholds: Per-label thresholds
+        calibration_params: Optional Platt calibration parameters per label
+        use_precision_gating: If True, use HARD/EASY precision-first gating
+    """
     print(f"🔧 Initializing CheXagent on device: {device}")
     chex = CheXagent(device=device)
     thresholds = thresholds or DEFAULT_THRESHOLDS
+    
+    if calibration_params:
+        print("📊 Calibration: ENABLED (Platt)")
+    if use_precision_gating:
+        print("🎯 Precision gating: ENABLED (HARD/EASY labels)")
 
     results: List[Dict[str, object]] = []
 
@@ -319,7 +427,7 @@ def smart_ensemble_prediction(
 
         di_text = chex.disease_identification([str(img_path)], CHEXPERT13)
         di_info = parse_di_response(di_text)
-        print(f"  DI response: {di_text}")
+        print(f"  DI response: {di_text[:150]}...")
 
         binary_outputs: Dict[str, Dict[str, object]] = {}
         final_labels: Dict[str, int] = {}
@@ -334,11 +442,20 @@ def smart_ensemble_prediction(
                 analysis_reasons = ["exception"]
             else:
                 score, analysis_reasons = parse_binary_response(raw_binary, disease)
+            
+            # Apply calibration if available
+            score_raw = score
+            if calibration_params:
+                score = apply_calibration(score, disease, calibration_params)
 
-            decision, decision_reasons = decide_label(disease, score, thresholds, di_info[disease])
+            decision, decision_reasons = decide_label(
+                disease, score, thresholds, di_info[disease], use_precision_gating
+            )
 
             binary_outputs[disease] = {
+                "score_raw": round(score_raw, 4),
                 "score": round(score, 4),
+                "calibrated": calibration_params is not None,
                 "threshold": thresholds.get(disease, 0.5),
                 "raw": raw_binary,
                 "analysis_reasons": analysis_reasons,
@@ -389,26 +506,73 @@ def save_results(results: List[Dict[str, object]], output_path: Path):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--images", type=str, required=True)
-    parser.add_argument("--out_csv", type=str, default="smart_ensemble_results.csv")
-    parser.add_argument("--device", type=str, default="mps")
+    parser = argparse.ArgumentParser(description="CheXagent smart ensemble with calibration support")
+    parser.add_argument("--images", type=str, required=True, help="Path to image list or directory")
+    parser.add_argument("--out_csv", type=str, default="smart_ensemble_results.csv", help="Output CSV path")
+    parser.add_argument("--device", type=str, default="mps", help="Device: mps, cuda, or cpu")
     parser.add_argument(
         "--thresholds",
         type=str,
         default="config/label_thresholds.json",
-        help="Optional JSON file containing per-label thresholds.",
+        help="Path to per-label thresholds JSON",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=str,
+        default=None,
+        help="Optional path to Platt calibration params (platt_params.json)",
+    )
+    parser.add_argument(
+        "--use_precision_gating",
+        action="store_true",
+        help="Enable precision-first HARD/EASY label gating",
     )
 
     args = parser.parse_args()
 
+    # Import from same directory (works when run as script from project root)
+    import sys
+    from pathlib import Path
+    inference_dir = Path(__file__).parent
+    if str(inference_dir) not in sys.path:
+        sys.path.insert(0, str(inference_dir))
     from infer_with_chexagent_class import collect_image_paths
 
-    image_paths = collect_image_paths(Path(args.images))
-    thresholds = load_thresholds(Path(args.thresholds))
+    # Resolve paths relative to project root if needed
+    images_path = Path(args.images)
+    if not images_path.is_absolute() and not images_path.exists():
+        # Try relative to project root
+        project_root = Path(__file__).parent.parent.parent
+        images_path = project_root / images_path
+    image_paths = collect_image_paths(images_path)
+    
+    thresholds_path = Path(args.thresholds)
+    if not thresholds_path.is_absolute() and not thresholds_path.exists():
+        project_root = Path(__file__).parent.parent.parent
+        thresholds_path = project_root / thresholds_path
+    thresholds = load_thresholds(thresholds_path)
+    
+    # Resolve calibration path if provided
+    calibration_path = None
+    if args.calibration:
+        calibration_path = Path(args.calibration)
+        if not calibration_path.is_absolute() and not calibration_path.exists():
+            project_root = Path(__file__).parent.parent.parent
+            calibration_path = project_root / calibration_path
+    calibration_params = load_calibration(calibration_path)
 
-    results = smart_ensemble_prediction(image_paths, args.device, thresholds)
+    results = smart_ensemble_prediction(
+        image_paths, 
+        args.device, 
+        thresholds,
+        calibration_params,
+        args.use_precision_gating,
+    )
     save_results(results, Path(args.out_csv))
 
     print(f"\n🎉 Smart ensemble processing complete!")
     print(f"Processed {len(results)} images")
+    if calibration_params:
+        print("✅ Calibration was applied")
+    if args.use_precision_gating:
+        print("✅ Precision gating was enabled")

@@ -6,32 +6,57 @@ __pycache__/
 .Python
 venv/
 env/
-ENV/
-.venv
+*.egg-info/
+dist/
+build/
 
-# Large logs (keep important evaluation logs)
-*.log
+# Data and results
+data/*.csv
+data/*.txt
+data/images/
+results/*.csv
+results/*.log
+results/old_logs/
+server_synced/
 
-# Large CSV files (keep evaluation manifests and important results)
-*.csv
-!data/evaluation_manifest*.csv
-!data/*.txt
+# Config (keep structure, ignore sensitive)
+config/*.json
+!config/.gitkeep
 
-# Model repos (large)
-chexagent_repo/
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
 
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
+*.code-workspace
+
+# Logs
+*.log
+nohup.out
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Temporary files
-*.tmp
-*.bak
-*.backup
+# Calibration outputs
+calibration*/
+*_calibrated.csv
+*_calibration_ready.csv
+
+# Large model files
+*.pth
+*.pt
+*.pkl
+*.h5
+*.ckpt
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# External repos (should be submodules or excluded)
+chexagent_repo/
