@@ -1,0 +1,14 @@
+label,threshold,precision,recall,f0.5
+Enlarged Cardiomediastinum,0.45,1.0,0.0,0.0
+Cardiomegaly,0.45,1.0,0.0,0.0
+Lung Opacity,0.45,1.0,1.0,1.0
+Lung Lesion,0.45,1.0,1.0,1.0
+Edema,0.45,1.0,1.0,1.0
+Consolidation,0.45,1.0,1.0,1.0
+Pneumonia,0.45,1.0,1.0,1.0
+Atelectasis,0.45,1.0,0.0,0.0
+Pneumothorax,0.45,1.0,1.0,1.0
+Pleural Effusion,0.45,1.0,1.0,1.0
+Pleural Other,0.45,1.0,1.0,1.0
+Fracture,0.45,1.0,1.0,1.0
+Support Devices,0.45,1.0,1.0,1.0

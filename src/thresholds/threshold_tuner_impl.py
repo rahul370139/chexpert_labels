@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from sklearn.metrics import precision_recall_curve, f1_score, precision_score, recall_score
 
 CHEXPERT14 = [
@@ -37,7 +37,12 @@ def _f_beta(p, r, beta: float):
     b2 = beta * beta
     return (1 + b2) * (p * r) / (b2 * p + r)
 
-def _pick_threshold_fbeta(y_true: np.ndarray, y_pred: np.ndarray, beta: float = 0.5, min_threshold: float = 0.3):
+def _pick_threshold_fbeta(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    beta: float = 0.5,
+    min_threshold: float = 0.3,
+):
     """
     Pick threshold that maximizes F-beta score.
     
@@ -68,11 +73,24 @@ def _pick_threshold_fbeta(y_true: np.ndarray, y_pred: np.ndarray, beta: float = 
     # Fallback: if all thresholds had recall=0, use first one anyway
     if best_t is None and len(thresh) > 0:
         best_t = float(thresh[0])
-        best = {"precision": float(precision[1]), "recall": float(recall[1]), "f_beta": _f_beta(float(precision[1]), float(recall[1]), beta)}
-    
+        best = {
+            "precision": float(precision[1]),
+            "recall": float(recall[1]),
+            "f_beta": _f_beta(float(precision[1]), float(recall[1]), beta),
+        }
+
+    if best_t is None:
+        best_t = min_threshold
+    else:
+        best_t = max(best_t, min_threshold)
     return best_t, best
 
-def _pick_threshold_min_precision(y_true: np.ndarray, y_pred: np.ndarray, min_precision: float, min_threshold: float = 0.3):
+def _pick_threshold_min_precision(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    min_precision: float,
+    min_threshold: float = 0.3,
+):
     """
     Pick threshold that maximizes recall subject to precision ≥ min_precision.
     
@@ -102,14 +120,23 @@ def _pick_threshold_min_precision(y_true: np.ndarray, y_pred: np.ndarray, min_pr
     
     # If no threshold met precision target, use F-beta as fallback (precision-weighted)
     if best_t is None:
-        best_t, b = _pick_threshold_fbeta(y_true, y_pred, beta=0.3, min_threshold=0.0)  # Remove min_threshold constraint for fallback
+        best_t, b = _pick_threshold_fbeta(
+            y_true,
+            y_pred,
+            beta=0.3,
+            min_threshold=0.0,
+        )
         best = {"precision": b["precision"], "recall": b["recall"]}
     
     # Final fallback
     if best_t is None and len(thresh) > 0:
         best_t = float(thresh[0])
         best = {"precision": float(precision[1]), "recall": float(recall[1])}
-    
+
+    if best_t is None:
+        best_t = min_threshold
+    else:
+        best_t = max(best_t, min_threshold)
     return best_t, best
 
 def _metrics_macro_micro(y_true_mat: np.ndarray, y_hat_mat: np.ndarray):
@@ -128,13 +155,16 @@ def _metrics_macro_micro(y_true_mat: np.ndarray, y_hat_mat: np.ndarray):
         "micro_f1": micro_f1,
     }
 
-def tune_thresholds(csv_path: str,
-                    out_json: str = "thresholds.json",
-                    out_metrics: str = "thresholds_summary.csv",
-                    mode: str = "fbeta",
-                    beta: float = 0.5,
-                    min_macro_precision: float = 0.60,
-                    labels: List[str] = CHEXPERT14):
+def tune_thresholds(
+    csv_path: str,
+    out_json: str = "thresholds.json",
+    out_metrics: str = "thresholds_summary.csv",
+    mode: str = "fbeta",
+    beta: float = 0.5,
+    min_macro_precision: float = 0.60,
+    labels: List[str] = CHEXPERT14,
+    min_floors: Optional[Dict[str, float]] = None,
+):
     df = pd.read_csv(csv_path)
     _ensure_cols(df, labels)
     thresholds = {}
@@ -142,20 +172,27 @@ def tune_thresholds(csv_path: str,
 
     # Minimum threshold floor to avoid overly permissive thresholds
     # (many binary scores cluster at 0.20 from negative parsing, causing optimizer to pick low thresholds)
-    MIN_THRESHOLD_FLOOR = 0.30
+    floor_default = 0.30 if not min_floors else float(min_floors.get("_default_", 0.30))
 
     if mode == "fbeta":
         for L in labels:
             y_true = df[f"y_true_{L}"].values.astype(int)
             y_pred = df[f"y_pred_{L}"].values.astype(float)
-            t, info = _pick_threshold_fbeta(y_true, y_pred, beta=beta, min_threshold=MIN_THRESHOLD_FLOOR)
+            min_floor = floor_default if not min_floors else float(min_floors.get(L, floor_default))
+            t, info = _pick_threshold_fbeta(y_true, y_pred, beta=beta, min_threshold=min_floor)
             thresholds[L] = t
             per_label_rows.append({"label": L, "threshold": t, "precision": info["precision"], "recall": info["recall"], f"f{beta}": info["f_beta"]})
     elif mode == "min_precision":
         for L in labels:
             y_true = df[f"y_true_{L}"].values.astype(int)
             y_pred = df[f"y_pred_{L}"].values.astype(float)
-            t, info = _pick_threshold_min_precision(y_true, y_pred, min_precision=min_macro_precision, min_threshold=MIN_THRESHOLD_FLOOR)
+            min_floor = floor_default if not min_floors else float(min_floors.get(L, floor_default))
+            t, info = _pick_threshold_min_precision(
+                y_true,
+                y_pred,
+                min_precision=min_macro_precision,
+                min_threshold=min_floor,
+            )
             thresholds[L] = t
             per_label_rows.append({"label": L, "threshold": t, "precision": info["precision"], "recall": info["recall"]})
     else:
