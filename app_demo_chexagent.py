@@ -580,32 +580,8 @@ def get_ground_truth_for(filename: str, artifacts: Dict[str, object]) -> Tuple[D
 # --------------------------------------------------------------------------------------
 
 
-def render_metrics_section(artifacts: Dict[str, object]) -> None:
-    st.markdown("### 📊 Pipeline Performance Summary")
-
-    macro_json = artifacts.get("dataset_metrics_macro") or {}
-    macro_all = macro_json.get("macro_all", {})
-    macro_nz = macro_json.get("macro_nonzero", {})
-    worst = macro_json.get("worst_labels", [])
-
-    cols = st.columns(3)
-    cols[0].metric("Micro F1", f"{macro_all.get('micro_f1', 0):.3f}" if macro_all else "n/a")
-    cols[1].metric("Macro F1 (all)", f"{macro_all.get('macro_f1', 0):.3f}" if macro_all else "n/a")
-    cols[2].metric("Macro F1 (nonzero)", f"{macro_nz.get('macro_f1', 0):.3f}" if macro_nz else "n/a")
-
-    if worst:
-        st.markdown("**Lowest F1 Labels:**")
-        worst_df = pd.DataFrame(worst)
-        st.dataframe(worst_df, use_container_width=True, hide_index=True)
-
-    tri_summary = artifacts.get("dataset_three_class_summary")
-    if tri_summary is not None:
-        st.markdown("**Three-Class (Certain Only) Macro:**")
-        st.table(tri_summary.set_index("metric"))
-
-
 def render_dataset_browser(artifacts: Dict[str, object], device: torch.device) -> None:
-    st.markdown("### 🔍 Explore Evaluation Samples")
+    st.markdown("### 🔍 Explore Evaluation Samples (Predictions vs Ground Truth)")
 
     preds_df: Optional[pd.DataFrame] = artifacts.get("dataset_preds")
     probs_df: Optional[pd.DataFrame] = artifacts.get("dataset_probs")
@@ -630,18 +606,26 @@ def render_dataset_browser(artifacts: Dict[str, object], device: torch.device) -
 
     binary_preds = {label: int(pred_row[label]) if label in pred_row else None for label in CHEXPERT14}
     probabilities = {label: float(prob_row.get(f"y_cal_{label}", float("nan"))) if prob_row is not None else float("nan") for label in LABELS}
-
-    tri_state = {label: compute_three_class(probabilities.get(label, 0.0), artifacts.get("thresholds", {}).get(label, 0.5), UNCERTAINTY_MARGIN) for label in LABELS}
+    tri_state = {
+        label: compute_three_class(
+            probabilities.get(label, 0.0),
+            artifacts.get("thresholds", {}).get(label, 0.5),
+            UNCERTAINTY_MARGIN,
+        )
+        for label in LABELS
+    }
 
     summary_df = pd.DataFrame({
         "Label": LABELS,
-        "Probability": [probabilities.get(label, float("nan")) for label in LABELS],
-        "Binary Prediction": [binary_preds.get(label) for label in LABELS],
-        "GT (0/1)": [gt_bin.get(label) if gt_bin else None for label in LABELS],
-        "Three-Class": [tri_state.get(label) for label in LABELS],
-        "GT (-1/0/1)": [gt_tri.get(label) if gt_tri else None for label in LABELS],
+        "Prediction (0/1)": [binary_preds.get(label) for label in LABELS],
+        "Ground Truth (0/1)": [gt_bin.get(label) if gt_bin else None for label in LABELS],
+        "Prediction (-1/0/1)": [tri_state.get(label) for label in LABELS],
+        "Ground Truth (-1/0/1)": [gt_tri.get(label) if gt_tri else None for label in LABELS],
     })
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    impression_text = build_brief_impression(binary_preds, tri_state, probabilities)
+    st.info(f"Impression: {impression_text}")
 
 
 def render_upload_section(artifacts: Dict[str, object], device: torch.device) -> None:
@@ -676,11 +660,13 @@ def render_upload_section(artifacts: Dict[str, object], device: torch.device) ->
     st.success(prediction.impression)
 
     st.markdown("#### 🔢 Probabilities & Decisions")
+    gt_bin, gt_tri = get_ground_truth_for(prediction.filename, artifacts)
     display_df = pd.DataFrame({
         "Label": LABELS,
-        "Blended Probability": [prediction.probabilities.get(label, float("nan")) for label in LABELS],
-        "Binary Prediction": [prediction.binary.get(label) for label in LABELS],
-        "Three-Class": [prediction.tri_state.get(label) for label in LABELS],
+        "Prediction (0/1)": [prediction.binary.get(label) for label in LABELS],
+        "Ground Truth (0/1)": [gt_bin.get(label) if gt_bin else None for label in LABELS],
+        "Prediction (-1/0/1)": [prediction.tri_state.get(label) for label in LABELS],
+        "Ground Truth (-1/0/1)": [gt_tri.get(label) if gt_tri else None for label in LABELS],
     })
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -705,7 +691,7 @@ def render_upload_section(artifacts: Dict[str, object], device: torch.device) ->
 def main() -> None:
     st.set_page_config(page_title="CheXpert Hybrid Demo", page_icon="🏥", layout="wide")
     st.title("🏥 CheXpert Hybrid Ensemble Demo")
-    st.caption("Continuous TXR + CheXagent linear probes + DI gating (binary and three-class outputs)")
+    st.caption("Compare hybrid predictions vs ground truth or upload a new study.")
 
     device_name = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     device = torch.device(device_name)
@@ -714,8 +700,6 @@ def main() -> None:
     artifacts = load_pipeline_artifacts()
     if not artifacts:
         st.stop()
-
-    render_metrics_section(artifacts)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -726,4 +710,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

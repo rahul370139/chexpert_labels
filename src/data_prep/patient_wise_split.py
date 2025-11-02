@@ -1,217 +1,221 @@
 #!/usr/bin/env python3
 """
-Patient-wise data splitting to prevent leakage.
+Patient-wise stratified splitting with positive-count balancing.
 
-MIMIC-CXR images have patient IDs (subject_id) embedded in paths like:
-  /path/to/files/p10/p10000032/s50414267/02aa804e-bde0afdd-112c0b34-7bc16630-4e384014.dcm
+Goal: ensure each CheXpert label retains approximately the desired number of positives
+in train vs validation while keeping patients disjoint.
 
-We need to split by patient (subject_id), not by image, so all images from one patient
-stay in the same split.
+The algorithm:
+ 1. Aggregate labels per patient (positive if any study for that patient has label==1).
+ 2. Sort patients by number of positive labels (descending).
+ 3. Greedily assign each patient to train/test to minimise the squared error between
+    observed positive counts and the target counts (train_ratio * total positives).
+ 4. Fall back to patient-count heuristics if a split reaches its target size.
+
+Usage:
+    python src/data_prep/patient_wise_split.py \
+        --manifest data/evaluation_manifest_phaseA_full_abs.csv \
+        --train_ratio 0.8 \
+        --output_dir data/splits_80_20
 """
 
-import pandas as pd
-import numpy as np
-from pathlib import Path
+from __future__ import annotations
+
 import argparse
 import json
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+import numpy as np
+import pandas as pd
+
+CHEXPERT13 = [
+    "Enlarged Cardiomediastinum",
+    "Cardiomegaly",
+    "Lung Opacity",
+    "Lung Lesion",
+    "Edema",
+    "Consolidation",
+    "Pneumonia",
+    "Atelectasis",
+    "Pneumothorax",
+    "Pleural Effusion",
+    "Pleural Other",
+    "Fracture",
+    "Support Devices",
+]
 
 
-def extract_patient_id(image_path):
-    """Extract patient ID from MIMIC-CXR path."""
+def extract_patient_id(image_path: str) -> str:
     path = Path(image_path)
     parts = path.parts
-    
-    # Look for pattern: p10/p10000032/s50414267/image.dcm
-    for i, part in enumerate(parts):
-        if part.startswith('p') and len(part) > 3 and i + 1 < len(parts):
-            # This should be the patient directory (e.g., p10000032)
-            patient_dir = parts[i + 1]
-            if patient_dir.startswith('p') and len(patient_dir) > 3:
-                return patient_dir
-    
-    # Fallback: try to find in path string
-    path_str = str(image_path)
+    for idx, part in enumerate(parts):
+        if part.startswith("p") and len(part) > 3 and idx + 1 < len(parts):
+            candidate = parts[idx + 1]
+            if candidate.startswith("p") and len(candidate) > 3:
+                return candidate
+    # fallback: look for "/p1234/p12345678/"
     import re
-    match = re.search(r'/p\d+/(p\d{8})/s\d+/', path_str)
+
+    match = re.search(r"/p\d+/(p\d{6,})/", str(path))
     if match:
         return match.group(1)
-    
-    # Last resort: use filename as proxy (not ideal but prevents crash)
     return path.stem
 
 
-def patient_wise_split(manifest_csv, predictions_csv, train_ratio=0.7, random_seed=42):
-    """
-    Split data patient-wise into train/test.
-    
-    Args:
-        manifest_csv: Ground truth CSV with image paths
-        predictions_csv: Predictions CSV (to ensure we only split images we have predictions for)
-        train_ratio: Fraction for training (default 0.7 for 70/30 split)
-        random_seed: Random seed for reproducibility
-    
-    Returns:
-        train_df, test_df: DataFrames with train/test splits
-    """
-    print(f"\n{'='*80}")
-    print(f"PATIENT-WISE SPLITTING (avoiding data leakage)")
-    print(f"{'='*80}\n")
-    
-    # Load data
-    gt_df = pd.read_csv(manifest_csv)
-    pred_df = pd.read_csv(predictions_csv)
-    
-    print(f"Ground truth: {len(gt_df)} images")
-    print(f"Predictions: {len(pred_df)} images")
-    
-    # Match on filename to get only images with predictions
-    gt_df['filename'] = gt_df['image'].apply(lambda x: Path(x).name)
-    pred_df['filename'] = pred_df['image'].apply(lambda x: Path(x).name)
-    
-    # Merge to get matched dataset
-    merged = pd.merge(gt_df, pred_df[['filename']], on='filename', how='inner')
-    print(f"Matched: {len(merged)} images")
-    
-    # Extract patient IDs
-    merged['patient_id'] = merged['image'].apply(extract_patient_id)
-    
-    # Get unique patients
-    patients = merged['patient_id'].unique()
-    n_patients = len(patients)
-    print(f"Unique patients: {n_patients}")
-    
-    # Shuffle and split patients
-    np.random.seed(random_seed)
-    shuffled_patients = np.random.permutation(patients)
-    
-    n_train = int(n_patients * train_ratio)
-    train_patients = set(shuffled_patients[:n_train])
-    test_patients = set(shuffled_patients[n_train:])
-    
-    # Split images by patient
-    train_df = merged[merged['patient_id'].isin(train_patients)].copy()
-    test_df = merged[merged['patient_id'].isin(test_patients)].copy()
-    
-    print(f"\n📊 Split summary:")
-    print(f"  Train: {len(train_patients)} patients, {len(train_df)} images ({len(train_df)/len(merged)*100:.1f}%)")
-    print(f"  Test:  {len(test_patients)} patients, {len(test_df)} images ({len(test_df)/len(merged)*100:.1f}%)")
-    
-    # Check for leakage
-    overlap = train_patients.intersection(test_patients)
-    if overlap:
-        print(f"  ⚠️  WARNING: {len(overlap)} patients appear in both splits!")
-    else:
-        print(f"  ✅ No patient leakage detected")
-    
-    # Show disease distribution in splits
-    CHEXPERT13 = [
-        "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion",
-        "Edema", "Consolidation", "Pneumonia", "Atelectasis", "Pneumothorax",
-        "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices"
-    ]
-    
-    print(f"\n📈 Disease distribution:")
-    print(f"{'Disease':<30} {'Train Pos':>10} {'Test Pos':>10} {'Train %':>10} {'Test %':>10}")
-    print("-" * 75)
-    
-    for disease in CHEXPERT13:
-        if disease in train_df.columns and disease in test_df.columns:
-            train_pos = train_df[disease].sum()
-            test_pos = test_df[disease].sum()
-            train_pct = train_pos / len(train_df) * 100
-            test_pct = test_pos / len(test_df) * 100
-            print(f"{disease:<30} {train_pos:>10} {test_pos:>10} {train_pct:>9.1f}% {test_pct:>9.1f}%")
-    
+def load_manifest(manifest_csv: Path, labels: Iterable[str]) -> pd.DataFrame:
+    df = pd.read_csv(manifest_csv)
+    if "image" not in df.columns:
+        raise ValueError(f"{manifest_csv} must contain an 'image' column with file paths.")
+    missing = [lab for lab in labels if lab not in df.columns]
+    if missing:
+        raise ValueError(f"Manifest is missing label columns: {missing}")
+    df["filename"] = df["image"].apply(lambda p: Path(str(p)).name)
+    df["patient_id"] = df["image"].apply(extract_patient_id)
+    return df
+
+
+def aggregate_patient_labels(df: pd.DataFrame, labels: List[str]) -> Dict[str, np.ndarray]:
+    patient_groups = df.groupby("patient_id")
+    patient_vectors: Dict[str, np.ndarray] = {}
+    for patient, group in patient_groups:
+        label_matrix = group[labels].values
+        positives = (label_matrix == 1).any(axis=0).astype(int)
+        patient_vectors[patient] = positives
+    return patient_vectors
+
+
+def stratified_patient_split(
+    patient_vectors: Dict[str, np.ndarray],
+    train_ratio: float,
+    random_seed: int,
+) -> Tuple[set[str], set[str]]:
+    rng = np.random.default_rng(random_seed)
+    patients = list(patient_vectors.keys())
+    total_patients = len(patients)
+    train_target = int(round(total_patients * train_ratio))
+    test_target = total_patients - train_target
+
+    label_matrix = np.stack([patient_vectors[p] for p in patients])
+    total_pos = label_matrix.sum(axis=0).astype(float)
+    desired_train = total_pos * train_ratio
+    desired_test = total_pos - desired_train
+
+    # Order patients by number of positives (desc), tie-break randomly
+    positives_counts = label_matrix.sum(axis=1)
+    order = np.argsort(-positives_counts + rng.random(len(patients)) * 1e-6)
+
+    train_patients: set[str] = set()
+    test_patients: set[str] = set()
+    train_counts = np.zeros(len(total_pos), dtype=float)
+    test_counts = np.zeros(len(total_pos), dtype=float)
+
+    for idx in order:
+        patient = patients[idx]
+        vector = patient_vectors[patient]
+
+        # If one split already full, force assignment to the other
+        if len(train_patients) >= train_target:
+            test_patients.add(patient)
+            test_counts += vector
+            continue
+        if len(test_patients) >= test_target:
+            train_patients.add(patient)
+            train_counts += vector
+            continue
+
+        # Compute squared error w.r.t. desired positive counts
+        err_train = np.sum((train_counts + vector - desired_train) ** 2)
+        err_test = np.sum((test_counts + vector - desired_test) ** 2)
+
+        # Regularise by patient counts to avoid drift
+        err_train += (len(train_patients) + 1 - train_target) ** 2 * 1e-3
+        err_test += (len(test_patients) + 1 - test_target) ** 2 * 1e-3
+
+        if err_train <= err_test:
+            train_patients.add(patient)
+            train_counts += vector
+        else:
+            test_patients.add(patient)
+            test_counts += vector
+
+    return train_patients, test_patients
+
+
+def build_splits(df: pd.DataFrame, train_patients: set[str], test_patients: set[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    train_df = df[df["patient_id"].isin(train_patients)].copy()
+    test_df = df[df["patient_id"].isin(test_patients)].copy()
     return train_df, test_df
 
 
-def save_split(train_df, test_df, output_dir="data"):
-    """Save train/test splits to files."""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True, parents=True)
-    
-    # Save image lists (for predictions)
-    train_images = train_df['image'].tolist()
-    test_images = test_df['image'].tolist()
-    
-    with open(output_dir / "train_images_70.txt", "w") as f:
-        f.write("\n".join(train_images))
-    
-    with open(output_dir / "test_images_30.txt", "w") as f:
-        f.write("\n".join(test_images))
-    
-    # Save ground truth CSVs
-    train_df.to_csv(output_dir / "ground_truth_train_70.csv", index=False)
-    test_df.to_csv(output_dir / "ground_truth_test_30.csv", index=False)
-    
-    # Save patient ID lists (for verification)
-    train_patients = sorted(train_df['patient_id'].unique())
-    test_patients = sorted(test_df['patient_id'].unique())
-    
-    with open(output_dir / "train_patients.json", "w") as f:
-        json.dump(train_patients, f, indent=2)
-    
-    with open(output_dir / "test_patients.json", "w") as f:
-        json.dump(test_patients, f, indent=2)
-    
-    print(f"\n💾 Saved split files to {output_dir}/")
-    print(f"  - train_images_70.txt ({len(train_images)} images)")
-    print(f"  - test_images_30.txt ({len(test_images)} images)")
-    print(f"  - ground_truth_train_70.csv")
-    print(f"  - ground_truth_test_30.csv")
-    print(f"  - train_patients.json ({len(train_patients)} patients)")
-    print(f"  - test_patients.json ({len(test_patients)} patients)")
+def report_distribution(train_df: pd.DataFrame, test_df: pd.DataFrame, labels: List[str]) -> None:
+    print("\n📈 Label distribution per split")
+    print(f"{'Label':30s} {'Train Pos':>10} {'Test Pos':>10} {'Train %':>10} {'Test %':>10}")
+    print("-" * 76)
+    for label in labels:
+        train_pos = int((train_df[label] == 1).sum())
+        test_pos = int((test_df[label] == 1).sum())
+        train_pct = train_pos / max(1, len(train_df)) * 100
+        test_pct = test_pos / max(1, len(test_df)) * 100
+        print(f"{label:30s} {train_pos:10d} {test_pos:10d} {train_pct:9.2f}% {test_pct:9.2f}%")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Patient-wise train/test split")
-    parser.add_argument(
-        "--manifest",
-        default="data/evaluation_manifest_phaseA_matched.csv",
-        help="Ground truth manifest CSV"
-    )
-    parser.add_argument(
-        "--predictions",
-        default="hybrid_ensemble_1000.csv",
-        help="Predictions CSV (to match images)"
-    )
-    parser.add_argument(
-        "--train_ratio",
-        type=float,
-        default=0.7,
-        help="Train split ratio (default 0.7 for 70/30)"
-    )
-    parser.add_argument(
-        "--output_dir",
-        default="data",
-        help="Output directory for split files"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed"
-    )
-    
+def save_split(train_df: pd.DataFrame, test_df: pd.DataFrame, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "train_images.txt").write_text("\n".join(train_df["image"]))
+    (output_dir / "test_images.txt").write_text("\n".join(test_df["image"]))
+    train_df.to_csv(output_dir / "ground_truth_train.csv", index=False)
+    test_df.to_csv(output_dir / "ground_truth_test.csv", index=False)
+    with open(output_dir / "train_patients.json", "w") as handle:
+        json.dump(sorted(train_df["patient_id"].unique()), handle, indent=2)
+    with open(output_dir / "test_patients.json", "w") as handle:
+        json.dump(sorted(test_df["patient_id"].unique()), handle, indent=2)
+    print(f"\n💾 Saved split artefacts to {output_dir}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Patient-wise stratified split for CheXpert labels")
+    parser.add_argument("--manifest", type=Path, required=True, help="CSV manifest with absolute image paths and CheXpert labels")
+    parser.add_argument("--predictions", type=Path, default=None,
+                        help="Optional predictions CSV to filter available images (must contain 'filename')")
+    parser.add_argument("--train_ratio", type=float, default=0.8)
+    parser.add_argument("--output_dir", type=Path, default=Path("data/split_80_20"))
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--labels", nargs="+", default=CHEXPERT13)
     args = parser.parse_args()
-    
-    train_df, test_df = patient_wise_split(
-        args.manifest,
-        args.predictions,
-        args.train_ratio,
-        args.seed
+
+    df = load_manifest(args.manifest, args.labels)
+
+    if args.predictions:
+        pred_df = pd.read_csv(args.predictions)
+        if "filename" not in pred_df.columns and "image" in pred_df.columns:
+            pred_df["filename"] = pred_df["image"].apply(lambda p: Path(str(p)).name)
+        if "filename" not in pred_df.columns:
+            raise ValueError(f"{args.predictions} must contain 'filename' or 'image' column.")
+        df = df[df["filename"].isin(pred_df["filename"])]
+        print(f"Filtered manifest to {len(df)} images that have predictions.")
+
+    print(f"Total images available: {len(df)}")
+
+    patient_vectors = aggregate_patient_labels(df, args.labels)
+    print(f"Unique patients: {len(patient_vectors)}")
+
+    train_patients, test_patients = stratified_patient_split(
+        patient_vectors,
+        train_ratio=args.train_ratio,
+        random_seed=args.seed,
     )
-    
+
+    train_df, test_df = build_splits(df, train_patients, test_patients)
+
+    print(f"\n📊 Split summary:")
+    print(f"  Train: {len(train_patients)} patients, {len(train_df)} images ({len(train_df)/len(df)*100:.1f}%)")
+    print(f"  Test : {len(test_patients)} patients, {len(test_df)} images ({len(test_df)/len(df)*100:.1f}%)")
+
+    report_distribution(train_df, test_df, args.labels)
     save_split(train_df, test_df, args.output_dir)
-    
-    print(f"\n✅ Patient-wise split complete!")
-    print(f"\nNext steps:")
-    print(f"  1. Fit calibration on train set:")
-    print(f"     python fit_label_calibrators.py --csv <train_predictions> --out_dir calibration_70")
-    print(f"  2. Evaluate on held-out test set:")
-    print(f"     python evaluate_against_phaseA.py <test_predictions>")
 
 
 if __name__ == "__main__":
     main()
-
