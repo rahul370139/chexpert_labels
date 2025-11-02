@@ -99,6 +99,8 @@ def main() -> None:
     parser.add_argument("--weight_step", type=float, default=0.1, help="Grid resolution for weights.")
     parser.add_argument("--out_weights_json", default="outputs/blend/blend_weights.json")
     parser.add_argument("--out_blended_csv", default="outputs/blend/train_blended.csv")
+    parser.add_argument("--align", choices=["reference", "intersection"], default="reference",
+                        help="How to align sources to labels: reference enforces full coverage; intersection uses common filenames across all sources.")
     args = parser.parse_args()
 
     sources = [parse_source(spec) for spec in args.probs_csv]
@@ -112,8 +114,35 @@ def main() -> None:
     source_frames: Dict[str, pd.DataFrame] = {}
     for spec in sources:
         df = pd.read_csv(spec.path)
-        aligned = align_to_reference(reference_filenames, df)
+        if args.align == "reference":
+            aligned = align_to_reference(reference_filenames, df)
+        else:
+            # Intersection mode: compute common filenames across all sources
+            df = ensure_filename_column(df)
+            source_frames[spec.name] = df  # temporarily store raw
+            continue
         source_frames[spec.name] = aligned
+
+    if args.align == "intersection":
+        # Compute common filenames across labels_df and all sources
+        common = set(reference_filenames)
+        for spec in sources:
+            df = source_frames[spec.name]
+            fns = set(df["filename"].tolist())
+            common &= fns
+        # Reduce to intersection
+        common_list = sorted(common)
+        dropped = len(reference_filenames) - len(common_list)
+        if dropped > 0:
+            print(f"⚠️  Intersection alignment: dropping {dropped} train rows without predictions across all sources.")
+        reference_filenames = common_list
+        # Filter labels_df to intersection
+        labels_df = labels_df[labels_df["filename"].isin(reference_filenames)].reset_index(drop=True)
+        # Now align each frame strictly to the intersection
+        for spec in sources:
+            df = source_frames[spec.name]
+            aligned = df.set_index("filename").reindex(reference_filenames).reset_index()
+            source_frames[spec.name] = aligned
 
     # Prepare base output with filenames and ground truth for convenience
     blended = labels_df[["filename"]].copy()

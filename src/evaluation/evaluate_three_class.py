@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Evaluate predictions against three-class ground truth (-1 uncertain, 0 negative, 1 positive).
+Comprehensive evaluation: Binary (0/1) vs Three-Class (-1/0/1) predictions.
 
-Compares predictions (0/1) with ground truth (-1/0/1) and reports:
-- Performance on certain labels only (GT = 0 or 1, ignoring -1)
-- Performance on all labels (treating -1 as 0 for comparison)
-- Agreement analysis (where GT has -1)
+This is the CANONICAL evaluation script for comparing prediction modes against 3-class ground truth.
+
+Features:
+1. Supports both binary predictions (0/1) and 3-class predictions (-1/0/1)
+2. Evaluates in both modes:
+   - Binary mode: treats -1 as 0 (allows comparison with uncertain GT)
+   - Certain-only mode: ignores -1 cases (evaluates only on certain GT)
+3. Provides comparison and recommendation on which mode performs better
 """
 
 import argparse
@@ -68,26 +72,44 @@ def evaluate_three_class(
     results = []
     
     for label in CHEXPERT13:
-        # Get columns
-        pred_col = label if label in merged.columns else f"{label}_pred"
-        gt_col = label if f"{label}_pred" not in merged.columns else label
-        
-        if pred_col not in merged.columns or gt_col not in merged.columns:
-            print(f"⚠️  Skipping {label}: missing columns")
+        # Determine merged column names after suffixing
+        pred_col = f"{label}_pred" if f"{label}_pred" in merged.columns else (label if label in merged.columns else None)
+        gt_col = f"{label}_gt" if f"{label}_gt" in merged.columns else (label if label in merged.columns else None)
+
+        if pred_col is None or gt_col is None or pred_col not in merged.columns or gt_col not in merged.columns:
+            print(f"⚠️  Skipping {label}: missing columns (pred='{pred_col}', gt='{gt_col}')")
             continue
         
         y_pred = merged[pred_col].astype(int).values
         y_true_raw = merged[gt_col].astype(int).values
+        
+        # Detect if predictions are 3-class (-1/0/1) or binary (0/1)
+        has_three_class_preds = (y_pred == -1).any()
+        
+        # For binary mode evaluation: convert to 0/1
+        y_pred_bin = (y_pred > 0).astype(int)
+        
+        # For 3-class evaluation: use predictions as-is if they're 3-class
+        if has_three_class_preds:
+            # Predictions are 3-class, evaluate certain-only
+            certain_mask_pred = (y_pred != -1)
+        else:
+            # Predictions are binary, only evaluate where GT is certain
+            certain_mask_pred = np.ones(len(y_pred), dtype=bool)
         
         # Count uncertain (-1) in ground truth
         uncertain_count = (y_true_raw == -1).sum()
         certain_count = len(y_true_raw) - uncertain_count
         
         # Mode 1: Only evaluate on certain labels (GT = 0 or 1, ignore -1)
-        certain_mask = y_true_raw != -1
+        # If predictions are 3-class, also ignore -1 predictions
+        certain_mask = (y_true_raw != -1) & certain_mask_pred
         if certain_mask.sum() > 0:
             y_true_certain = y_true_raw[certain_mask]
-            y_pred_certain = y_pred[certain_mask]
+            if has_three_class_preds:
+                y_pred_certain = y_pred[certain_mask]  # Use 3-class predictions directly
+            else:
+                y_pred_certain = y_pred_bin[certain_mask]  # Binary predictions
             
             p_certain = precision_score(y_true_certain, y_pred_certain, zero_division=0)
             r_certain = recall_score(y_true_certain, y_pred_certain, zero_division=0)
@@ -98,14 +120,18 @@ def evaluate_three_class(
         
         # Mode 2: Treat -1 as 0 for comparison (binary evaluation)
         y_true_binary = (y_true_raw == 1).astype(int)
-        p_binary = precision_score(y_true_binary, y_pred, zero_division=0)
-        r_binary = recall_score(y_true_binary, y_pred, zero_division=0)
-        f1_binary = f1_score(y_true_binary, y_pred, zero_division=0)
-        acc_binary = accuracy_score(y_true_binary, y_pred)
+        p_binary = precision_score(y_true_binary, y_pred_bin, zero_division=0)
+        r_binary = recall_score(y_true_binary, y_pred_bin, zero_division=0)
+        f1_binary = f1_score(y_true_binary, y_pred_bin, zero_division=0)
+        acc_binary = accuracy_score(y_true_binary, y_pred_bin)
+        
+        # Count uncertain predictions
+        pred_uncertain = (y_pred == -1).sum() if has_three_class_preds else 0
         
         results.append({
             "label": label,
-            "uncertain_count": uncertain_count,
+            "uncertain_gt_count": uncertain_count,
+            "uncertain_pred_count": int(pred_uncertain),
             "certain_count": certain_count,
             "precision_certain_only": p_certain,
             "recall_certain_only": r_certain,
@@ -119,6 +145,8 @@ def evaluate_three_class(
         
         print(f"\n  {label}:")
         print(f"    Uncertain in GT: {uncertain_count} ({uncertain_count/len(merged)*100:.1f}%)")
+        if has_three_class_preds:
+            print(f"    Uncertain in Pred: {pred_uncertain} ({pred_uncertain/len(merged)*100:.1f}%)")
         print(f"    Certain only - P: {p_certain:.3f}, R: {r_certain:.3f}, F1: {f1_certain:.3f}")
         print(f"    Binary mode (-1→0) - P: {p_binary:.3f}, R: {r_binary:.3f}, F1: {f1_binary:.3f}")
     
@@ -138,6 +166,25 @@ def evaluate_three_class(
     print(f"     Macro P: {macro_p_certain:.3f}, R: {macro_r_certain:.3f}, F1: {macro_f1_certain:.3f}")
     print(f"   Binary mode (uncertain→0):")
     print(f"     Macro P: {macro_p_binary:.3f}, R: {macro_r_binary:.3f}, F1: {macro_f1_binary:.3f}")
+    
+    # Recommendation
+    print(f"\n💡 Recommendation:")
+    p_diff = macro_p_certain - macro_p_binary
+    f1_diff = macro_f1_certain - macro_f1_binary
+    
+    if p_diff > 0.10 and f1_diff > 0.05:
+        print(f"   ✅ USE THREE-CLASS MODE (certain-only evaluation)")
+        print(f"   - Precision is {p_diff:.3f} higher than binary mode")
+        print(f"   - F1 is {f1_diff:.3f} higher")
+        print(f"   - Better clinical interpretation (uncertainty is meaningful)")
+    elif p_diff > 0.05:
+        print(f"   ✅ PREFER THREE-CLASS MODE")
+        print(f"   - Precision is {p_diff:.3f} higher (reduces false positives)")
+        print(f"   - Better for clinical settings where uncertainty matters")
+    else:
+        print(f"   ⚖️  BOTH MODES SIMILAR")
+        print(f"   - Use binary for simplicity")
+        print(f"   - Use 3-class if uncertainty interpretation is important")
     
     # Save
     output_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -216,4 +263,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

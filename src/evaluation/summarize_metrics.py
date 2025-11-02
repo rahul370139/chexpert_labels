@@ -59,8 +59,15 @@ def main() -> None:
     }
     print("macro_all:", macro_all)
     print("macro_nonzero:", macro_nz)
+    metrics = metrics.sort_values(by="f1")
+    worst = metrics.head(5)[["label", "precision", "recall", "f1"]].to_dict(orient="records")
+    print("worst_labels:", worst)
     if args.out_json:
-        Path(args.out_json).write_text(json.dumps({"macro_all": macro_all, "macro_nonzero": macro_nz}, indent=2))
+        Path(args.out_json).write_text(json.dumps({
+            "macro_all": macro_all,
+            "macro_nonzero": macro_nz,
+            "worst_labels": worst
+        }, indent=2))
         print(f"wrote {args.out_json}")
 
 

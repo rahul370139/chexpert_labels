@@ -1,0 +1,57 @@
+{
+  "macro_all": {
+    "macro_precision": 0.1776165881267676,
+    "macro_recall": 0.14298449361071597,
+    "macro_f1": 0.15491207114188105
+  },
+  "macro_nonzero": {
+    "macro_precision": 0.20991051324072532,
+    "macro_recall": 0.16898167426720978,
+    "macro_f1": 0.1830779022585867,
+    "labels": [
+      "Enlarged Cardiomediastinum",
+      "Lung Opacity",
+      "Lung Lesion",
+      "Edema",
+      "Consolidation",
+      "Pneumonia",
+      "Pneumothorax",
+      "Pleural Effusion",
+      "Pleural Other",
+      "Fracture",
+      "Support Devices"
+    ]
+  },
+  "worst_labels": [
+    {
+      "label": "Cardiomegaly",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    {
+      "label": "Atelectasis",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    {
+      "label": "Lung Lesion",
+      "precision": 0.037037037037037,
+      "recall": 0.0147058823529411,
+      "f1": 0.0210526315789473
+    },
+    {
+      "label": "Fracture",
+      "precision": 0.0204081632653061,
+      "recall": 0.0227272727272727,
+      "f1": 0.021505376344086
+    },
+    {
+      "label": "Enlarged Cardiomediastinum",
+      "precision": 0.054054054054054,
+      "recall": 0.0307692307692307,
+      "f1": 0.0392156862745098
+    }
+  ]
+}

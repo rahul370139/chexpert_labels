@@ -63,8 +63,26 @@ def prepare_predictions(
     pred_df = pd.read_csv(predictions_csv)
     gt_df = pd.read_csv(ground_truth_csv)
 
-    pred_df["filename"] = pred_df["image"].apply(lambda x: Path(x).name)
-    gt_df["filename"] = gt_df["image"].apply(lambda x: Path(x).name)
+    # Ensure filename column exists (handle both "image" and "filename" columns)
+    if "filename" not in pred_df.columns:
+        if "image" in pred_df.columns:
+            pred_df["filename"] = pred_df["image"].apply(lambda x: Path(x).name if pd.notna(x) else "")
+        else:
+            raise ValueError(f"Neither 'filename' nor 'image' column found in {predictions_csv}")
+    else:
+        # If filename exists but is full path, extract just the name
+        if pred_df["filename"].str.contains("/").any():
+            pred_df["filename"] = pred_df["filename"].apply(lambda x: Path(x).name if pd.notna(x) else "")
+    
+    if "filename" not in gt_df.columns:
+        if "image" in gt_df.columns:
+            gt_df["filename"] = gt_df["image"].apply(lambda x: Path(x).name if pd.notna(x) else "")
+        else:
+            raise ValueError(f"Neither 'filename' nor 'image' column found in {ground_truth_csv}")
+    else:
+        # If filename exists but is full path, extract just the name
+        if gt_df["filename"].str.contains("/").any():
+            gt_df["filename"] = gt_df["filename"].apply(lambda x: Path(x).name if pd.notna(x) else "")
 
     merged = pd.merge(pred_df, gt_df, on="filename", suffixes=("_pred", "_gt"))
     if merged.empty:
@@ -73,9 +91,15 @@ def prepare_predictions(
     output: Dict[str, np.ndarray] = {"filename": merged["filename"].values}
 
     for label in CHEXPERT14:
+        # Skip "No Finding" if not present (it's derived)
+        if label == "No Finding":
+            # No Finding is derived from other labels, skip it here
+            continue
+            
         pred_col = find_prediction_column(merged, label, score_prefixes=score_prefixes)
         if pred_col is None:
-            raise ValueError(f"Could not find probability column for label '{label}' in {predictions_csv}.")
+            print(f"⚠️  Skipping '{label}': probability column not found")
+            continue
         series = merged[pred_col].astype(float)
         if series.isna().all():
             print(f"⚠️  All predictions for '{label}' are NaN. Filling with zeros.")
@@ -89,7 +113,8 @@ def prepare_predictions(
             # Some manifests use the bare label
             alt = label
             if alt not in merged.columns:
-                raise ValueError(f"Ground truth column for '{label}' not found in {ground_truth_csv}.")
+                print(f"⚠️  Skipping '{label}': ground truth column not found")
+                continue
             gt_col = alt
         output[f"y_true_{label}"] = merged[gt_col].replace(-1, 0).astype(int).values
 

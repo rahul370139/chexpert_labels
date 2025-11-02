@@ -1,0 +1,54 @@
+{
+  "Enlarged Cardiomediastinum": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Cardiomegaly": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Lung Opacity": {
+    "txr": 1.0,
+    "probe": 0.0
+  },
+  "Lung Lesion": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Edema": {
+    "txr": 0.5,
+    "probe": 0.5
+  },
+  "Consolidation": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Pneumonia": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Atelectasis": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Pneumothorax": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Pleural Effusion": {
+    "txr": 0.5294117647058824,
+    "probe": 0.47058823529411764
+  },
+  "Pleural Other": {
+    "txr": 0.0,
+    "probe": 1.0
+  },
+  "Fracture": {
+    "txr": 0.16666666666666669,
+    "probe": 0.8333333333333334
+  },
+  "Support Devices": {
+    "txr": 0.0,
+    "probe": 1.0
+  }
+}

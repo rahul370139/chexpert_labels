@@ -60,3 +60,4 @@ calibration*/
 
 # External repos (should be submodules or excluded)
 chexagent_repo/
+files/

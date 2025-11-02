@@ -173,6 +173,59 @@ def main():
         "Apply TXR calibrators (test)",
         skip_if_exists=txr_test_cal if args.resume else None)
 
+    # Step 4b: Selective heavy TXR inference (5 labels with 6.8GB model)
+    txr_heavy_raw = txr_dir / "txr_heavy_predictions.csv"
+    run([sys.executable, "src/inference/txr_selective_infer.py",
+         "--images", str(project_root / args.images),
+         "--output", str(txr_heavy_raw),
+         "--device", args.device,
+         "--model_weights", "resnet50-res512-all",
+         "--batch_size", "16",
+         "--num_workers", "2"],
+        "Selective TXR heavy inference (5-label ensemble)",
+        skip_if_exists=txr_heavy_raw if args.resume else None)
+
+    txr_heavy_train_scores = txr_dir / "train_txr_heavy_scores.csv"
+    txr_heavy_test_scores = txr_dir / "test_txr_heavy_scores.csv"
+
+    run([sys.executable, "src/data_prep/prepare_predictions_for_calibration.py",
+         "--predictions", str(txr_heavy_raw),
+         "--ground_truth", str(gt_train),
+         "--output", str(txr_heavy_train_scores)],
+        "Prepare TXR heavy train scores",
+        skip_if_exists=txr_heavy_train_scores if args.resume else None)
+
+    run([sys.executable, "src/data_prep/prepare_predictions_for_calibration.py",
+         "--predictions", str(txr_heavy_raw),
+         "--ground_truth", str(gt_test),
+         "--output", str(txr_heavy_test_scores)],
+        "Prepare TXR heavy test scores",
+        skip_if_exists=txr_heavy_test_scores if args.resume else None)
+
+    txr_heavy_calib_dir = txr_dir / "calibration_txr_heavy"
+    txr_heavy_train_cal = txr_dir / "train_txr_heavy_calibrated.csv"
+    txr_heavy_test_cal = txr_dir / "test_txr_heavy_calibrated.csv"
+
+    run([sys.executable, "src/calibration/fit_label_calibrators.py",
+         "--csv", str(txr_heavy_train_scores),
+         "--out_dir", str(txr_heavy_calib_dir)],
+        "Fit TXR heavy calibrators",
+        skip_if_exists=txr_heavy_calib_dir / "platt_params.json" if args.resume else None)
+
+    run([sys.executable, "src/calibration/apply_label_calibrators.py",
+         "--csv", str(txr_heavy_train_scores),
+         "--calib_dir", str(txr_heavy_calib_dir),
+         "--out_csv", str(txr_heavy_train_cal)],
+        "Apply TXR heavy calibrators (train)",
+        skip_if_exists=txr_heavy_train_cal if args.resume else None)
+
+    run([sys.executable, "src/calibration/apply_label_calibrators.py",
+         "--csv", str(txr_heavy_test_scores),
+         "--calib_dir", str(txr_heavy_calib_dir),
+         "--out_csv", str(txr_heavy_test_cal)],
+        "Apply TXR heavy calibrators (test)",
+        skip_if_exists=txr_heavy_test_cal if args.resume else None)
+
     # Step 5: Linear probe embeddings (train/test)
     embed_train_npz = probe_dir / "train_chexagent_cxr.npz"
     embed_test_npz = probe_dir / "test_chexagent_cxr.npz"
@@ -236,6 +289,7 @@ def main():
     run([sys.executable, "src/blending/search_blend_weights.py",
          "--probs_csv", f"{txr_train_cal},txr",
          "--probs_csv", f"{probe_train_cal},probe",
+         "--probs_csv", f"{txr_heavy_train_cal},txr_heavy",
          "--labels_csv", str(gt_train),
          "--labels", "chexpert13",
          "--score_prefix", "y_cal_",
@@ -285,6 +339,7 @@ def main():
     run([sys.executable, "src/evaluation/run_test_eval.py",
          "--probs_csv", f"{txr_test_cal},txr",
          "--probs_csv", f"{probe_test_cal},probe",
+         "--probs_csv", f"{txr_heavy_test_cal},txr_heavy",
          "--blend_weights_json", str(blend_weights_json),
          "--meta_platt_json", str(meta_platt_json),
          "--thresholds_json", str(thresholds_json),
@@ -334,4 +389,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

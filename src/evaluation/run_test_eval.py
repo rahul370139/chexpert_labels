@@ -35,13 +35,27 @@ def parse_source(arg: str) -> Tuple[str, Path]:
     return name, path
 
 
-def load_sources(source_args: List[str], filenames: List[str]) -> Dict[str, pd.DataFrame]:
+def load_sources(source_args: List[str], filenames: List[str], align: str = "reference") -> Dict[str, pd.DataFrame]:
     sources: Dict[str, pd.DataFrame] = {}
+    raw: Dict[str, pd.DataFrame] = {}
     for arg in source_args:
         name, path = parse_source(arg)
         df = pd.read_csv(path)
-        aligned = align_to_reference(filenames, df)
-        sources[name] = aligned
+        if align == "reference":
+            aligned = align_to_reference(filenames, df)
+            sources[name] = aligned
+        else:
+            raw[name] = ensure_filename_column(df)
+    if align == "intersection":
+        common = set(filenames)
+        for name, df in raw.items():
+            common &= set(df["filename"].tolist())
+        common_list = sorted(common)
+        for name, df in raw.items():
+            aligned = df.set_index("filename").reindex(common_list).reset_index()
+            sources[name] = aligned
+        # Replace filenames with intersection for downstream ops
+        return {"__filenames__": pd.DataFrame({"filename": common_list}), **sources}
     return sources
 
 
@@ -80,9 +94,12 @@ def apply_meta_calibration(
     labels: Iterable[str],
     params: Dict[str, Dict[str, float]],
 ) -> None:
+    import numpy as np
     if not params:
         for label in labels:
-            blended[f"y_cal_{label}"] = blended[f"y_pred_{label}"]
+            pred_col = f"y_pred_{label}"
+            if pred_col in blended.columns:
+                blended[f"y_cal_{label}"] = blended[pred_col]
         return
     for label in labels:
         coeffs = params.get(label)
@@ -93,8 +110,15 @@ def apply_meta_calibration(
         if not coeffs:
             blended[f"y_cal_{label}"] = scores
             continue
-        calibrated = apply_platt_to_scores(scores, coeffs["a"], coeffs["b"])
-        blended[f"y_cal_{label}"] = calibrated
+        method = coeffs.get("method", "platt")
+        if method == "isotonic" and "x" in coeffs and "y" in coeffs:
+            x = np.array(coeffs["x"], dtype=float)
+            y = np.array(coeffs["y"], dtype=float)
+            blended[f"y_cal_{label}"] = np.interp(scores, x, y).astype("float32")
+        else:
+            a = float(coeffs.get("a", 1.0))
+            b = float(coeffs.get("b", 0.0))
+            blended[f"y_cal_{label}"] = apply_platt_to_scores(scores, a, b)
 
 
 def load_thresholds(path: Path) -> Dict[str, float]:
@@ -161,6 +185,14 @@ def apply_gating(
     score_prefix: str,
 ) -> pd.DataFrame:
     labels = [label for label in thresholds.keys() if f"{score_prefix}{label}" in probs.columns]
+    if not labels:
+        # Fallback: infer labels from available score columns
+        inferred = []
+        prefix = f"{score_prefix}"
+        for col in probs.columns:
+            if col.startswith(prefix):
+                inferred.append(col[len(prefix):])
+        labels = inferred
     preds = probs[["filename"]].copy()
     preds["No Finding"] = 0
 
@@ -184,6 +216,7 @@ def apply_gating(
     high_prob_override = float(rules.get("high_prob_override", 0.80))
     high_prob_bypass_di_easy = bool(rules.get("high_prob_bypass_di_easy", False))
     consistency = rules.get("consistency", {})
+    no_rescue_labels = set(rules.get("no_rescue_labels", []))
 
     for idx, row in probs.iterrows():
         filename = row["filename"]
@@ -208,7 +241,7 @@ def apply_gating(
                 di_pos = di_positive(di_entry, hard_di_min)
                 if mention_present and not di_pos and hard_require_di_if_mentioned and decision == 1:
                     decision = 0
-                if di_pos and ((decision == 0 and rescue_hard) or prob >= threshold - rescue_margin):
+                if label not in no_rescue_labels and di_pos and ((decision == 0 and rescue_hard) or prob >= threshold - rescue_margin):
                     decision = 1
             elif label in easy:
                 # High-prob override: bypass DI for easy labels if prob >= high_prob_override
@@ -253,17 +286,26 @@ def compute_metrics(
     preds_df: pd.DataFrame,
     labels_df: pd.DataFrame,
 ) -> Tuple[Dict[str, float], List[Dict[str, float]]]:
+    labels = list(labels)
+    present_pred_labels = [l for l in labels if l in preds_df.columns]
+    if not present_pred_labels:
+        raise ValueError("No predicted label columns present in preds_df.")
+
     y_true_cols = []
-    for label in labels:
+    kept_labels = []
+    for label in present_pred_labels:
         if f"y_true_{label}" in labels_df.columns:
             y_true_cols.append(f"y_true_{label}")
+            kept_labels.append(label)
         elif label in labels_df.columns:
             y_true_cols.append(label)
+            kept_labels.append(label)
         else:
-            raise ValueError(f"Ground truth missing for label '{label}'.")
+            # skip labels missing in ground truth
+            continue
 
     y_true = labels_df[y_true_cols].to_numpy(dtype=int)
-    y_pred = preds_df[list(labels)].to_numpy(dtype=int)
+    y_pred = preds_df[kept_labels].to_numpy(dtype=int)
 
     macro_p = precision_score(y_true, y_pred, average="macro", zero_division=0)
     macro_r = recall_score(y_true, y_pred, average="macro", zero_division=0)
@@ -282,7 +324,7 @@ def compute_metrics(
     }
 
     per_label = []
-    for idx, label in enumerate(labels):
+    for idx, label in enumerate(kept_labels):
         yt = y_true[:, idx]
         yp = y_pred[:, idx]
         per_label.append(
@@ -314,6 +356,8 @@ def main() -> None:
     parser.add_argument("--meta_prefix", default="y_cal_")
     parser.add_argument("--gating_config", default=None)
     parser.add_argument("--metadata_csv", default=None, help="CheXagent metadata (binary_outputs/di_outputs).")
+    parser.add_argument("--align", choices=["reference", "intersection"], default="reference",
+                        help="Alignment mode across sources and labels.")
     parser.add_argument("--out_probs_csv", default="outputs/final/test_probs.csv")
     parser.add_argument("--out_preds_csv", default="outputs/final/test_preds.csv")
     parser.add_argument("--out_metrics_csv", default="outputs/final/test_metrics.csv")
@@ -321,7 +365,12 @@ def main() -> None:
 
     labels_df = ensure_filename_column(pd.read_csv(args.test_labels_csv))
     filenames = labels_df["filename"].tolist()
-    sources = load_sources(args.probs_csv, filenames)
+    sources = load_sources(args.probs_csv, filenames, align=args.align)
+    if args.align == "intersection":
+        inter_df = sources.pop("__filenames__")
+        # Reduce labels_df to intersection
+        labels_df = labels_df.merge(inter_df, on="filename", how="inner")
+        filenames = labels_df["filename"].tolist()
 
     weights = json.loads(Path(args.blend_weights_json).read_text())
     labels = get_label_list(args.labels)

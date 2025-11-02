@@ -109,6 +109,17 @@ def create_manifest_5k(
         print("❌ PhaseA manifest missing 'image_path' or 'filename' column")
         print(f"   Available columns: {list(phaseA_df.columns)}")
         sys.exit(1)
+
+    # Flatten nested CheXpert labels if present (e.g., a 'chexpert' dict per row)
+    if "chexpert" in phaseA_df.columns:
+        try:
+            chex_cols = pd.json_normalize(phaseA_df["chexpert"]).add_prefix("")
+            # Only add missing label columns
+            for col in CHEXPERT13:
+                if col in chex_cols.columns and col not in phaseA_df.columns:
+                    phaseA_df[col] = chex_cols[col]
+        except Exception as e:
+            print(f"⚠️  Could not normalize nested 'chexpert' column: {e}. Proceeding without flattening; labels may be missing.")
     
     # Match filenames
     matched = phaseA_df[phaseA_df["filename"].isin(chex_filenames)].copy()
