@@ -8,6 +8,7 @@ This script is IDEMPOTENT: skips steps if outputs already exist.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import pandas as pd
@@ -83,11 +84,14 @@ def main():
         skip_if_exists=txr_preds if args.resume else None)
 
     # Step 2: Patient-wise split (80/20)
-    gt_train = splits_dir / "train.csv"
-    gt_test = splits_dir / "test.csv"
+    # Use the existing splits that were already created
+    gt_train = splits_dir / "ground_truth_train.csv"
+    gt_test = splits_dir / "ground_truth_test.csv"
     
     if args.resume and gt_train.exists() and gt_test.exists():
         print(f"\n⏭️  Skipping patient-wise split (already exists)")
+        print(f"   Using: {gt_train} ({len(pd.read_csv(gt_train))} images)")
+        print(f"   Using: {gt_test} ({len(pd.read_csv(gt_test))} images)")
     else:
         # Use temporary output directory for patient_wise_split
         temp_split_dir = splits_dir / "temp"
@@ -102,12 +106,10 @@ def main():
             f"Patient-wise {int(args.train_ratio*100)}/{int((1-args.train_ratio)*100)} split",
             skip_if_exists=None)
         
-        # Move results to final location (patient_wise_split.py saves with hardcoded 70/30 names)
+        # Move results to final location (patient_wise_split.py saves as ground_truth_train.csv and ground_truth_test.csv)
         import shutil
-        # patient_wise_split.py saves as ground_truth_train_70.csv and ground_truth_test_30.csv
-        # regardless of actual ratio, so we read those
-        train_source = temp_split_dir / "ground_truth_train_70.csv"
-        test_source = temp_split_dir / "ground_truth_test_30.csv"
+        train_source = temp_split_dir / "ground_truth_train.csv"
+        test_source = temp_split_dir / "ground_truth_test.csv"
         
         if train_source.exists():
             shutil.copy(str(train_source), str(gt_train))
@@ -123,7 +125,6 @@ def main():
         
         # Cleanup temp dir
         try:
-            import shutil
             shutil.rmtree(temp_split_dir)
         except Exception as e:
             print(f"⚠️  Could not remove temp dir: {e}")
@@ -173,58 +174,58 @@ def main():
         "Apply TXR calibrators (test)",
         skip_if_exists=txr_test_cal if args.resume else None)
 
-    # Step 4b: Selective heavy TXR inference (5 labels with 6.8GB model)
-    txr_heavy_raw = txr_dir / "txr_heavy_predictions.csv"
-    run([sys.executable, "src/inference/txr_selective_infer.py",
-         "--images", str(project_root / args.images),
-         "--output", str(txr_heavy_raw),
-         "--device", args.device,
-         "--model_weights", "resnet50-res512-all",
-         "--batch_size", "16",
-         "--num_workers", "2"],
-        "Selective TXR heavy inference (5-label ensemble)",
-        skip_if_exists=txr_heavy_raw if args.resume else None)
+    # Step 4b: If selective heavy TXR outputs already exist, process them
+    txr_heavy_train_raw = txr_dir / "txr_heavy_train.csv"
+    txr_heavy_test_raw = txr_dir / "txr_heavy_test.csv"
+    txr_heavy_train_cal = None
+    txr_heavy_test_cal = None
 
-    txr_heavy_train_scores = txr_dir / "train_txr_heavy_scores.csv"
-    txr_heavy_test_scores = txr_dir / "test_txr_heavy_scores.csv"
+    if txr_heavy_train_raw.exists() and txr_heavy_test_raw.exists():
+        print("\n📂 Found selective TXR heavy outputs – integrating into pipeline")
+        txr_heavy_train_scores = txr_dir / "train_txr_heavy_scores.csv"
+        txr_heavy_test_scores = txr_dir / "test_txr_heavy_scores.csv"
 
-    run([sys.executable, "src/data_prep/prepare_predictions_for_calibration.py",
-         "--predictions", str(txr_heavy_raw),
-         "--ground_truth", str(gt_train),
-         "--output", str(txr_heavy_train_scores)],
-        "Prepare TXR heavy train scores",
-        skip_if_exists=txr_heavy_train_scores if args.resume else None)
+        run([sys.executable, "src/data_prep/prepare_predictions_for_calibration.py",
+             "--predictions", str(txr_heavy_train_raw),
+             "--ground_truth", str(gt_train),
+             "--output", str(txr_heavy_train_scores),
+             "--score_prefix", "prob_"],
+            "Prepare TXR heavy train scores",
+            skip_if_exists=txr_heavy_train_scores if args.resume else None)
 
-    run([sys.executable, "src/data_prep/prepare_predictions_for_calibration.py",
-         "--predictions", str(txr_heavy_raw),
-         "--ground_truth", str(gt_test),
-         "--output", str(txr_heavy_test_scores)],
-        "Prepare TXR heavy test scores",
-        skip_if_exists=txr_heavy_test_scores if args.resume else None)
+        run([sys.executable, "src/data_prep/prepare_predictions_for_calibration.py",
+             "--predictions", str(txr_heavy_test_raw),
+             "--ground_truth", str(gt_test),
+             "--output", str(txr_heavy_test_scores),
+             "--score_prefix", "prob_"],
+            "Prepare TXR heavy test scores",
+            skip_if_exists=txr_heavy_test_scores if args.resume else None)
 
-    txr_heavy_calib_dir = txr_dir / "calibration_txr_heavy"
-    txr_heavy_train_cal = txr_dir / "train_txr_heavy_calibrated.csv"
-    txr_heavy_test_cal = txr_dir / "test_txr_heavy_calibrated.csv"
+        txr_heavy_calib_dir = txr_dir / "calibration_txr_heavy"
+        txr_heavy_train_cal = txr_dir / "train_txr_heavy_calibrated.csv"
+        txr_heavy_test_cal = txr_dir / "test_txr_heavy_calibrated.csv"
 
-    run([sys.executable, "src/calibration/fit_label_calibrators.py",
-         "--csv", str(txr_heavy_train_scores),
-         "--out_dir", str(txr_heavy_calib_dir)],
-        "Fit TXR heavy calibrators",
-        skip_if_exists=txr_heavy_calib_dir / "platt_params.json" if args.resume else None)
+        run([sys.executable, "src/calibration/fit_label_calibrators.py",
+             "--csv", str(txr_heavy_train_scores),
+             "--out_dir", str(txr_heavy_calib_dir)],
+            "Fit TXR heavy calibrators",
+            skip_if_exists=txr_heavy_calib_dir / "platt_params.json" if args.resume else None)
 
-    run([sys.executable, "src/calibration/apply_label_calibrators.py",
-         "--csv", str(txr_heavy_train_scores),
-         "--calib_dir", str(txr_heavy_calib_dir),
-         "--out_csv", str(txr_heavy_train_cal)],
-        "Apply TXR heavy calibrators (train)",
-        skip_if_exists=txr_heavy_train_cal if args.resume else None)
+        run([sys.executable, "src/calibration/apply_label_calibrators.py",
+             "--csv", str(txr_heavy_train_scores),
+             "--calib_dir", str(txr_heavy_calib_dir),
+             "--out_csv", str(txr_heavy_train_cal)],
+            "Apply TXR heavy calibrators (train)",
+            skip_if_exists=txr_heavy_train_cal if args.resume else None)
 
-    run([sys.executable, "src/calibration/apply_label_calibrators.py",
-         "--csv", str(txr_heavy_test_scores),
-         "--calib_dir", str(txr_heavy_calib_dir),
-         "--out_csv", str(txr_heavy_test_cal)],
-        "Apply TXR heavy calibrators (test)",
-        skip_if_exists=txr_heavy_test_cal if args.resume else None)
+        run([sys.executable, "src/calibration/apply_label_calibrators.py",
+             "--csv", str(txr_heavy_test_scores),
+             "--calib_dir", str(txr_heavy_calib_dir),
+             "--out_csv", str(txr_heavy_test_cal)],
+            "Apply TXR heavy calibrators (test)",
+            skip_if_exists=txr_heavy_test_cal if args.resume else None)
+    else:
+        print("\n⏭️  No selective TXR heavy outputs detected – continuing without them")
 
     # Step 5: Linear probe embeddings (train/test)
     embed_train_npz = probe_dir / "train_chexagent_cxr.npz"
@@ -286,17 +287,24 @@ def main():
     blend_weights_json = blend_dir / "blend_weights.json"
     blend_train_csv = blend_dir / "train_blended.csv"
     
-    run([sys.executable, "src/blending/search_blend_weights.py",
-         "--probs_csv", f"{txr_train_cal},txr",
-         "--probs_csv", f"{probe_train_cal},probe",
-         "--probs_csv", f"{txr_heavy_train_cal},txr_heavy",
-         "--labels_csv", str(gt_train),
-         "--labels", "chexpert13",
-         "--score_prefix", "y_cal_",
-         "--metric", "fbeta",
-         "--beta", "0.3",  # Precision-weighted
-         "--out_weights_json", str(blend_weights_json),
-         "--out_blended_csv", str(blend_train_csv)],
+    # Build blend command dynamically based on available sources
+    # Use intersection mode to handle cases where TXR/probe don't have all train images
+    blend_cmd = [sys.executable, "src/blending/search_blend_weights.py",
+                "--probs_csv", f"{txr_train_cal},txr",
+                "--probs_csv", f"{probe_train_cal},probe"]
+    if txr_heavy_train_cal:
+        blend_cmd.extend(["--probs_csv", f"{txr_heavy_train_cal},txr_heavy"])
+    blend_cmd.extend([
+        "--labels_csv", str(gt_train),
+        "--labels", "chexpert13",
+        "--score_prefix", "y_cal_",
+        "--metric", "fbeta",
+        "--beta", "0.3",  # Precision-weighted
+        "--align", "intersection",  # Use intersection mode to handle missing images
+        "--out_weights_json", str(blend_weights_json),
+        "--out_blended_csv", str(blend_train_csv)])
+    
+    run(blend_cmd,
         "Search blend weights (precision-weighted β=0.3) and create blended train",
         skip_if_exists=blend_train_csv if args.resume else None)
 
@@ -321,14 +329,17 @@ def main():
     
     thresholds_json = thrs_dir / "thresholds.json"
     
-    run([sys.executable, "src/thresholding/tune_thresholds.py",
+    prevalence_guard = os.environ.get("THRESH_PREVALENCE_GUARD", "0.40")
+
+    run([sys.executable, "src/thresholds/tune_thresholds_constrained.py",
          "--calibrated_train_csv", str(blend_train_cal),
          "--labels", "chexpert13",
-         "--score_prefix", "y_cal_",
-         "--min_thresholds_json", str(minfloors_json),
+         "--per_label_constraints_json", str(project_root / "config/per_label_constraints.json"),
+         "--minfloors_json", str(minfloors_json),
+         "--prevalence_guard", str(prevalence_guard),
          "--out_thresholds_json", str(thresholds_json),
          "--out_summary_csv", str(thrs_dir / "summary.csv")],
-        "Tune thresholds on blended train (with floors)",
+        "Tune thresholds on blended train (constrained)",
         skip_if_exists=thresholds_json if args.resume else None)
 
     # Step 11: Final test eval (DI-gated)
@@ -336,22 +347,27 @@ def main():
     test_preds_csv = final_dir / "test_preds.csv"
     test_metrics_csv = final_dir / "test_metrics.csv"
     
-    run([sys.executable, "src/evaluation/run_test_eval.py",
-         "--probs_csv", f"{txr_test_cal},txr",
-         "--probs_csv", f"{probe_test_cal},probe",
-         "--probs_csv", f"{txr_heavy_test_cal},txr_heavy",
-         "--blend_weights_json", str(blend_weights_json),
-         "--meta_platt_json", str(meta_platt_json),
-         "--thresholds_json", str(thresholds_json),
-         "--test_labels_csv", str(gt_test),
-         "--labels", "chexpert13",
-         "--score_prefix", "y_cal_",
-         "--meta_prefix", "y_cal_",
-         "--gating_config", str(project_root / "config" / "gating.json"),
-         "--metadata_csv", str(project_root / args.chexagent_metadata),
-         "--out_probs_csv", str(test_probs_csv),
-         "--out_preds_csv", str(test_preds_csv),
-         "--out_metrics_csv", str(test_metrics_csv)],
+    # Build eval command dynamically
+    eval_cmd = [sys.executable, "src/evaluation/run_test_eval.py",
+               "--probs_csv", f"{txr_test_cal},txr",
+               "--probs_csv", f"{probe_test_cal},probe"]
+    if txr_heavy_test_cal:
+        eval_cmd.extend(["--probs_csv", f"{txr_heavy_test_cal},txr_heavy"])
+    eval_cmd.extend([
+        "--blend_weights_json", str(blend_weights_json),
+        "--meta_platt_json", str(meta_platt_json),
+        "--thresholds_json", str(thresholds_json),
+        "--test_labels_csv", str(gt_test),
+        "--labels", "chexpert13",
+        "--score_prefix", "y_cal_",
+        "--meta_prefix", "y_cal_",
+        "--gating_config", str(project_root / "config" / "gating.json"),
+        "--metadata_csv", str(project_root / args.chexagent_metadata),
+        "--out_probs_csv", str(test_probs_csv),
+        "--out_preds_csv", str(test_preds_csv),
+        "--out_metrics_csv", str(test_metrics_csv)])
+    
+    run(eval_cmd,
         "Evaluate blended + DI-gated on test",
         skip_if_exists=test_metrics_csv if args.resume else None)
 

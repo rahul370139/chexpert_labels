@@ -125,14 +125,20 @@ class TXRDataset(Dataset):
 
     def __getitem__(self, idx: int):
         record = self.records[idx]
-        image = Image.open(record.image_path).convert("L")
-        image = image.resize((224, 224), Image.BILINEAR)
-        arr = np.array(image, dtype=np.float32)
-        arr = xrv.datasets.normalize(arr, 255.0)
-        arr = arr[None, :, :]  # (1, H, W)
+        try:
+            # Open and close file properly to avoid broken pipe
+            with Image.open(record.image_path) as img:
+                image = img.convert("L").copy()  # Copy to avoid keeping file handle open
+            # Process image (outside with block, but inside try)
+            image = image.resize((224, 224), Image.BILINEAR)
+            arr = np.array(image, dtype=np.float32)
+            arr = xrv.datasets.normalize(arr, 255.0)
+            arr = arr[None, :, :]  # (1, H, W)
 
-        tensor = torch.from_numpy(arr).float()
-        return tensor, str(record.image_path), record.patient_id
+            tensor = torch.from_numpy(arr).float()
+            return tensor, str(record.image_path), record.patient_id
+        except Exception as e:
+            raise RuntimeError(f"Failed to load image {record.image_path}: {e}") from e
 
 
 def load_image_paths(input_path: Path) -> List[Path]:
@@ -167,12 +173,24 @@ def infer_txr(
     batch_size: int,
     num_workers: int,
 ) -> Dict[str, Dict[str, float]]:
-    dataset = TXRDataset(images)
+    # Validate image paths exist
+    valid_images = [Path(img) for img in images if Path(img).exists()]
+    if not valid_images:
+        raise FileNotFoundError(f"No valid images found in: {images}")
+    
+    # For single image uploads, force CPU and num_workers=0 to avoid multiprocessing issues
+    # This prevents broken pipe errors on Apple Silicon and other platforms
+    if len(valid_images) == 1:
+        device = torch.device("cpu")
+        num_workers = 0
+    
+    dataset = TXRDataset(valid_images)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        pin_memory=device.type != "cpu",
+        pin_memory=False,
+        persistent_workers=False,
     )
 
     model = xrv.models.DenseNet(weights=model_weights)

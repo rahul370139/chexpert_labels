@@ -170,7 +170,10 @@ def main() -> None:
         if y_true_col not in blended.columns:
             print(f"⚠️  Ground truth missing for '{label}'. Skipping weight search.")
             continue
-        y_true = blended[y_true_col].to_numpy(dtype=int)
+        # Convert to binary (handle -1 uncertain as 0)
+        y_true = blended[y_true_col].replace(-1, 0).astype(int)
+        # Ensure binary (only 0 and 1)
+        y_true = np.clip(y_true, 0, 1).astype(int)
 
         best_score = -np.inf
         best_vector = None

@@ -46,6 +46,8 @@ CHEXPERT13 = [
     "Support Devices",
 ]
 
+INVERTED_PROB_LABELS = {"Pleural Other"}
+
 
 def get_label_list(name: str) -> List[str]:
     key = name.strip().lower()
@@ -78,11 +80,23 @@ def main() -> None:
 
     for lab in labels:
         yt_col = f"y_true_{lab}"
+        if yt_col not in df.columns and f"y_true_{lab}_true" in df.columns:
+            yt_col = f"y_true_{lab}_true"
         yp_col = f"y_pred_{lab}"
         if yt_col not in df.columns or yp_col not in df.columns:
             continue
-        y_true = df[yt_col].astype(int).to_numpy()
-        y_pred = df[yp_col].astype(float).to_numpy()
+        y_true_raw = df[yt_col].to_numpy()
+        y_pred_raw = df[yp_col].astype(float).to_numpy()
+        if lab in INVERTED_PROB_LABELS:
+            y_pred_raw = 1.0 - y_pred_raw
+        mask = np.isin(y_true_raw, [0, 1]) & ~np.isnan(y_pred_raw)
+        coverage = int(mask.sum())
+        if coverage == 0:
+            print(f"⚠️  {lab}: no certain labels available; skipping")
+            continue
+
+        y_true = y_true_raw[mask].astype(int)
+        y_pred = y_pred_raw[mask]
         prev_train = float(np.mean(y_true))
 
         p, r, t = precision_recall_curve(y_true, y_pred)
@@ -132,7 +146,19 @@ def main() -> None:
             chosen = (max(th, min_floor), prec, rec, prev_hat)
 
         th, prec, rec, prev_hat = chosen
+        y_hat = (y_pred >= th).astype(int)
+        if y_hat.sum() == 0 and (y_true == 1).sum() > 0:
+            th = min_floor
+            y_hat = (y_pred >= th).astype(int)
+            prec = precision_score(y_true, y_hat, zero_division=0)
+            rec = recall_score(y_true, y_hat, zero_division=0)
+            f1 = f1_score(y_true, y_hat, zero_division=0)
+            prev_hat = float(np.mean(y_hat))
+        else:
+            f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+
         thresholds[lab] = th
+        print(f"   {lab}: coverage={coverage}/{len(y_true_raw)} ({coverage/max(len(y_true_raw),1):.1%}) → τ={th:.3f}, P={prec:.3f}, R={rec:.3f}")
         rows.append({
             "label": lab,
             "threshold": th,
@@ -140,7 +166,9 @@ def main() -> None:
             "recall": rec,
             "prev_train": prev_train,
             "prev_hat": prev_hat,
-            "constraint": constraints.get(lab, {})
+            "constraint": constraints.get(lab, {}),
+            "coverage": coverage,
+            "total": int(len(y_true_raw))
         })
 
     Path(args.out_thresholds_json).write_text(json.dumps(thresholds, indent=2))
@@ -150,4 +178,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -174,11 +174,12 @@ def main():
         val_predictions = f"predictions_val_{args.n_images}.csv"
         
         run_cmd([
-            "python", "smart_ensemble.py",
+            sys.executable, "src/inference/smart_ensemble.py",
             "--images", "data/image_list_1000_absolute.txt",  # Use your existing image list
             "--out_csv", val_predictions,
             "--device", args.device,
-            "--thresholds", "config/label_thresholds.json"
+            "--thresholds", "config/label_thresholds.json",
+            "--force_zero_labels", "Cardiomegaly", "Atelectasis"
         ], "Running smart_ensemble on VAL set (no calibration yet)")
         
         # STEP 2: Prepare data and fit calibration
@@ -190,7 +191,7 @@ def main():
         prepare_for_calibration(val_predictions, args.ground_truth, val_tuning_csv)
         
         run_cmd([
-            "python", "fit_label_calibrators.py",
+            sys.executable, "src/calibration/fit_label_calibrators.py",
             "--csv", val_tuning_csv,
             "--out_dir", str(calib_dir)
         ], "Fitting Platt calibration")
@@ -203,12 +204,13 @@ def main():
         calibrated_predictions = f"hybrid_ensemble_{args.n_images}_calibrated.csv"
         
         cmd = [
-            "python", "smart_ensemble.py",
+            sys.executable, "src/inference/smart_ensemble.py",
             "--images", "data/image_list_1000_absolute.txt",
             "--out_csv", calibrated_predictions,
             "--device", args.device,
             "--thresholds", "config/label_thresholds.json",
-            "--calibration", str(calib_dir / "platt_params.json")
+            "--calibration", str(calib_dir / "platt_params.json"),
+            "--force_zero_labels", "Cardiomegaly", "Atelectasis"
         ]
         
         if args.use_precision_gating:
@@ -223,7 +225,7 @@ def main():
         
         # Prepare calibrated VAL data for threshold tuning
         run_cmd([
-            "python", "apply_label_calibrators.py",
+            sys.executable, "src/calibration/apply_label_calibrators.py",
             "--csv", val_tuning_csv,
             "--calib_dir", str(calib_dir),
             "--method", "platt",
@@ -231,7 +233,7 @@ def main():
         ], "Applying calibration to VAL scores")
         
         run_cmd([
-            "python", "threshold_tuner.py",
+            sys.executable, "src/thresholding/tune_thresholds.py",
             "--csv", "val_tuning_data_calibrated.csv",
             "--mode", "fbeta",
             "--beta", "0.3",  # Precision-weighted
@@ -245,8 +247,10 @@ def main():
         print("="*80)
         
         run_cmd([
-            "python", "evaluate_against_phaseA.py",
-            calibrated_predictions
+            sys.executable, "src/evaluation/evaluate_results.py",
+            "--predictions", calibrated_predictions,
+            "--ground_truth", "data/evaluation_manifest_phaseA_matched.csv",
+            "--name", "Calibrated + Precision Gating",
         ], "Evaluating calibrated predictions", check=False)
         
         print(f"\n✅ Full pipeline complete!")
@@ -261,11 +265,12 @@ def main():
         test_predictions = f"test_{args.n_images}_calibrated.csv"
         
         cmd = [
-            "python", "smart_ensemble.py",
+            sys.executable, "src/inference/smart_ensemble.py",
             "--images", "data/image_list_10.txt" if args.n_images <= 10 else "data/image_list_1000_absolute.txt",
             "--out_csv", test_predictions,
             "--device", args.device,
-            "--thresholds", "config/label_thresholds.json"
+            "--thresholds", "config/label_thresholds.json",
+            "--force_zero_labels", "Cardiomegaly", "Atelectasis"
         ]
         
         # Use existing calibration if available
@@ -291,7 +296,7 @@ def main():
         prepare_for_calibration(args.predictions, args.ground_truth, val_tuning_csv)
         
         run_cmd([
-            "python", "fit_label_calibrators.py",
+            sys.executable, "src/calibration/fit_label_calibrators.py",
             "--csv", val_tuning_csv,
             "--out_dir", str(calib_dir)
         ], "Fitting Platt calibration")
@@ -304,12 +309,13 @@ def main():
         out_csv = f"hybrid_ensemble_{args.n_images}_calibrated.csv"
         
         cmd = [
-            "python", "smart_ensemble.py",
+            sys.executable, "src/inference/smart_ensemble.py",
             "--images", "data/image_list_1000_absolute.txt",
             "--out_csv", out_csv,
             "--device", args.device,
             "--thresholds", "config/label_thresholds.json",
-            "--calibration", str(calib_dir / "platt_params.json")
+            "--calibration", str(calib_dir / "platt_params.json"),
+            "--force_zero_labels", "Cardiomegaly", "Atelectasis"
         ]
         
         if args.use_precision_gating:
@@ -322,4 +328,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

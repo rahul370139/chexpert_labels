@@ -206,6 +206,13 @@ def parse_di_response(text: str) -> Dict[str, Dict[str, float]]:
     text_lower = text.lower()
     info: Dict[str, Dict[str, float]] = {}
 
+    # Extended keyword mapping for Pleural Other
+    PLEURAL_OTHER_KEYWORDS = [
+        "pleural other", "pleural thickening", "pleural plaques", 
+        "pleural calcifications", "pleural scarring", "pleural fibrosis",
+        "pleural changes", "pleural abnormality", "pleural disease"
+    ]
+
     for disease in CHEXPERT13:
         disease_lower = disease.lower()
         entry = {
@@ -228,13 +235,24 @@ def parse_di_response(text: str) -> Dict[str, Dict[str, float]]:
                 info[disease] = entry
                 continue
 
-        # Positive assertion only if disease is referenced with positive language
-        # Avoid treating mere mentions (e.g., echoed options) as evidence
-        mentioned = disease_lower in text_lower
+        # For Pleural Other, check extended keyword list
+        if disease == "Pleural Other":
+            mentioned = any(keyword in text_lower for keyword in PLEURAL_OTHER_KEYWORDS)
+            # Find position of first matching keyword for context analysis
+            disease_pos = -1
+            for keyword in PLEURAL_OTHER_KEYWORDS:
+                pos = text_lower.find(keyword)
+                if pos >= 0:
+                    disease_pos = pos
+                    break
+        else:
+            # Positive assertion only if disease is referenced with positive language
+            # Avoid treating mere mentions (e.g., echoed options) as evidence
+            mentioned = disease_lower in text_lower
+            disease_pos = text_lower.find(disease_lower) if mentioned else -1
         
-        if mentioned:
+        if mentioned and disease_pos >= 0:
             # Check for strong positive language near the disease mention
-            disease_pos = text_lower.find(disease_lower)
             context_window = 50  # characters before/after disease mention to check
             context_start = max(0, disease_pos - context_window)
             context_end = min(len(text_lower), disease_pos + len(disease_lower) + context_window)
@@ -400,6 +418,7 @@ def smart_ensemble_prediction(
     thresholds: Dict[str, float] = None,
     calibration_params: Optional[Dict[str, Dict[str, float]]] = None,
     use_precision_gating: bool = False,
+    force_zero_labels: Optional[List[str]] = None,
 ) -> List[Dict[str, object]]:
     """
     Run CheXagent inference with optional calibration and precision gating.
@@ -421,6 +440,7 @@ def smart_ensemble_prediction(
         print("🎯 Precision gating: ENABLED (HARD/EASY labels)")
 
     results: List[Dict[str, object]] = []
+    force_zero = set(force_zero_labels or [])
 
     for index, img_path in enumerate(image_paths, start=1):
         print(f"\nProcessing {index}/{len(image_paths)}: {img_path.name}")
@@ -468,6 +488,11 @@ def smart_ensemble_prediction(
             log_entries.append(
                 f"{disease}: score={score:.2f} tau={thresholds.get(disease, 0.5):.2f} -> {decision} ({reason_txt})"
             )
+
+        # Apply force-zero after per-label loop
+        for lz in force_zero:
+            if lz in final_labels:
+                final_labels[lz] = 0
 
         no_finding = 1 if all(v == 0 for v in final_labels.values()) else 0
         final_labels["No Finding"] = no_finding
@@ -527,6 +552,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable precision-first HARD/EASY label gating",
     )
+    parser.add_argument(
+        "--force_zero_labels",
+        nargs="*",
+        default=[],
+        help="Labels to always set to 0 in final decisions",
+    )
 
     args = parser.parse_args()
 
@@ -567,6 +598,7 @@ if __name__ == "__main__":
         thresholds,
         calibration_params,
         args.use_precision_gating,
+        force_zero_labels=args.force_zero_labels,
     )
     save_results(results, Path(args.out_csv))
 

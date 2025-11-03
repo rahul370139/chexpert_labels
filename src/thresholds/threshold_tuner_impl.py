@@ -48,8 +48,21 @@ def _pick_threshold_fbeta(
     
     Args:
         min_threshold: Minimum threshold to consider (avoids too-permissive thresholds from score clustering)
+    
+    Note: Masks out -1 (uncertain) and NaN (blanks) in ground truth. Only uses 0/1 labels.
     """
-    precision, recall, thresh = precision_recall_curve(y_true, y_pred)
+    # Mask out -1 (uncertain) and NaN (blanks) - only use certain labels (0/1)
+    valid_mask = (y_true != -1) & ~np.isnan(y_true) & ~np.isnan(y_pred)
+    if valid_mask.sum() == 0:
+        return min_threshold, {"precision": 0.0, "recall": 0.0, "f_beta": 0.0}
+    
+    y_true_masked = y_true[valid_mask].astype(int)
+    y_pred_masked = y_pred[valid_mask].astype(float)
+    
+    # Ensure binary (0/1 only)
+    y_true_masked = np.clip(y_true_masked, 0, 1).astype(int)
+    
+    precision, recall, thresh = precision_recall_curve(y_true_masked, y_pred_masked)
     best_t, best_f = None, -1.0
     best = {"precision": 0.0, "recall": 0.0, "f_beta": 0.0}
     
@@ -99,8 +112,21 @@ def _pick_threshold_min_precision(
     Args:
         min_precision: Minimum required precision
         min_threshold: Minimum threshold floor (after precision constraint)
+    
+    Note: Masks out -1 (uncertain) and NaN (blanks) in ground truth. Only uses 0/1 labels.
     """
-    precision, recall, thresh = precision_recall_curve(y_true, y_pred)
+    # Mask out -1 (uncertain) and NaN (blanks) - only use certain labels (0/1)
+    valid_mask = (y_true != -1) & ~np.isnan(y_true) & ~np.isnan(y_pred)
+    if valid_mask.sum() == 0:
+        return min_threshold, {"precision": 0.0, "recall": 0.0, "f_beta": 0.0}
+    
+    y_true_masked = y_true[valid_mask].astype(int)
+    y_pred_masked = y_pred[valid_mask].astype(float)
+    
+    # Ensure binary (0/1 only)
+    y_true_masked = np.clip(y_true_masked, 0, 1).astype(int)
+    
+    precision, recall, thresh = precision_recall_curve(y_true_masked, y_pred_masked)
     best_t, best_r = None, -1.0
     best = {"precision": 0.0, "recall": 0.0}
     
@@ -201,12 +227,26 @@ def tune_thresholds(
     y_true_mat, y_hat_mat = [], []
     for _, row in df.iterrows():
         yt, yh = [], []
+        valid_row = True
         for L in labels:
-            yt.append(int(row[f"y_true_{L}"]))
+            yt_val = row[f"y_true_{L}"]
+            # Skip rows with -1 (uncertain) or NaN (blanks) - mask them out
+            if pd.isna(yt_val) or yt_val == -1:
+                valid_row = False
+                break
+            yt.append(int(yt_val))
             yh.append(1 if float(row[f"y_pred_{L}"]) >= thresholds[L] else 0)
-        y_true_mat.append(yt); y_hat_mat.append(yh)
+        if valid_row:
+            y_true_mat.append(yt)
+            y_hat_mat.append(yh)
 
-    y_true_mat = np.array(y_true_mat); y_hat_mat = np.array(y_hat_mat)
+    if len(y_true_mat) == 0:
+        # No valid rows after masking
+        agg = {"macro_precision": 0.0, "macro_recall": 0.0, "macro_f1": 0.0,
+               "micro_precision": 0.0, "micro_recall": 0.0, "micro_f1": 0.0}
+    else:
+        y_true_mat = np.array(y_true_mat).astype(int)
+        y_hat_mat = np.array(y_hat_mat).astype(int)
     agg = _metrics_macro_micro(y_true_mat, y_hat_mat)
 
     Path(out_json).write_text(json.dumps(thresholds, indent=2))

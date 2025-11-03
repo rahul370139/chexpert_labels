@@ -35,7 +35,7 @@ CHEXPERT14 = [
 CHEXPERT13 = CHEXPERT14[:-1]
 
 
-def load_results(predictions_csv: Path, manifest_csv: Path):
+def load_results(predictions_csv: Path, manifest_csv: Path, force_zero: Optional[List[str]] = None, exclude: Optional[List[str]] = None):
     """Load predictions and ground truth, parsing stored binary scores if present."""
     print("📊 Loading evaluation results...")
 
@@ -52,6 +52,20 @@ def load_results(predictions_csv: Path, manifest_csv: Path):
             print("🧮 Parsed binary probability metadata for threshold analysis.")
         except (json.JSONDecodeError, TypeError) as exc:
             print(f"⚠️  Failed to parse binary_outputs column: {exc}")
+
+    # Optionally force specific predicted labels to zero (e.g., labels with zero positives)
+    if force_zero:
+        for lbl in force_zero:
+            if lbl in predictions_df.columns:
+                predictions_df[lbl] = 0
+    # Optionally drop excluded labels from both frames to avoid spurious metrics
+    if exclude:
+        for lbl in exclude:
+            pred_col = lbl
+            gt_cols = [lbl, f"{lbl}_gt", f"y_true_{lbl}"]
+            if pred_col in predictions_df.columns:
+                predictions_df.drop(columns=[pred_col], inplace=True, errors="ignore")
+            # Ground truth will be merged later; we only track exclusion intent here
 
     ground_truth_df = pd.read_csv(manifest_csv)
     print(f"✅ Loaded {len(ground_truth_df)} ground truth samples")
@@ -96,7 +110,7 @@ def analyze_disease_distribution(predictions_df: pd.DataFrame):
     return disease_counts
 
 
-def calculate_performance_metrics(predictions_df: pd.DataFrame, ground_truth_df: pd.DataFrame):
+def calculate_performance_metrics(predictions_df: pd.DataFrame, ground_truth_df: pd.DataFrame, exclude: Optional[List[str]] = None):
     """Calculate per-label metrics."""
     print("\n📈 Performance Metrics Calculation:")
 
@@ -110,7 +124,8 @@ def calculate_performance_metrics(predictions_df: pd.DataFrame, ground_truth_df:
 
     results: Dict[str, Dict[str, float]] = {}
 
-    for disease in CHEXPERT14:
+    label_list = [l for l in CHEXPERT14 if not exclude or l not in exclude]
+    for disease in label_list:
         y_true = merged_df[f"{disease}_gt"].values
         y_pred = merged_df[f"{disease}_pred"].values
 
@@ -143,9 +158,9 @@ def calculate_overall_metrics(results: Dict[str, Dict[str, float]]):
     """Compute macro/micro aggregates."""
     print("\n🎯 Overall Performance Summary:")
 
-    macro_precision = np.mean([r["precision"] for r in results.values()])
-    macro_recall = np.mean([r["recall"] for r in results.values()])
-    macro_f1 = np.mean([r["f1"] for r in results.values()])
+    macro_precision = np.mean([r["precision"] for k, r in results.items()])
+    macro_recall = np.mean([r["recall"] for k, r in results.items()])
+    macro_f1 = np.mean([r["f1"] for k, r in results.items()])
 
     total_tp = sum(r["true_positives"] for r in results.values())
     total_fp = sum(r["false_positives"] for r in results.values())
@@ -635,6 +650,18 @@ def main():
         default=0.7,
         help="Minimum precision target for threshold recommendations (default: 0.7)"
     )
+    parser.add_argument(
+        "--exclude_labels",
+        nargs="*",
+        default=[],
+        help="Labels to exclude from metrics (e.g., zero-positive labels)",
+    )
+    parser.add_argument(
+        "--force_zero_labels",
+        nargs="*",
+        default=[],
+        help="Force these predicted labels to 0 before evaluation",
+    )
     
     args = parser.parse_args()
     
@@ -649,10 +676,15 @@ def main():
     print(f"\n📁 Predictions: {predictions_path}")
     print(f"📁 Ground Truth: {ground_truth_path}")
     
-    predictions_df, ground_truth_df = load_results(predictions_path, ground_truth_path)
+    predictions_df, ground_truth_df = load_results(
+        predictions_path,
+        ground_truth_path,
+        force_zero=args.force_zero_labels,
+        exclude=args.exclude_labels,
+    )
     verification_counts = analyze_verification_patterns(predictions_df)
     disease_counts = analyze_disease_distribution(predictions_df)
-    results, merged_df = calculate_performance_metrics(predictions_df, ground_truth_df)
+    results, merged_df = calculate_performance_metrics(predictions_df, ground_truth_df, exclude=args.exclude_labels)
     overall_metrics = calculate_overall_metrics(results)
     analyze_verification_effectiveness(predictions_df)
     

@@ -110,13 +110,13 @@ def prepare_predictions(
 
         gt_col = f"{label}_gt"
         if gt_col not in merged.columns:
-            # Some manifests use the bare label
             alt = label
             if alt not in merged.columns:
                 print(f"⚠️  Skipping '{label}': ground truth column not found")
                 continue
             gt_col = alt
-        output[f"y_true_{label}"] = merged[gt_col].replace(-1, 0).astype(int).values
+        gt_values = pd.to_numeric(merged[gt_col], errors="coerce")
+        output[f"y_true_{label}"] = gt_values.values
 
     df = pd.DataFrame(output)
     if drop_na:

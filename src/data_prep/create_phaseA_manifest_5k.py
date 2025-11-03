@@ -41,9 +41,18 @@ def load_phaseA_jsonl(jsonl_path: Path) -> pd.DataFrame:
 
 
 def normalize_label(value, keep_uncertain: bool = False) -> int:
-    """Convert -1/0/1 to 0/1 (-1 → 0) or keep -1 if keep_uncertain=True."""
+    """
+    Normalize CheXpert label values:
+    - NaN/None/empty → -1 (uncertain/blank - to be masked later)
+    - -1 → -1 (uncertain)
+    - 0 → 0 (negative)
+    - 1 → 1 (positive)
+    
+    CRITICAL: Blanks (NaN) are ALWAYS converted to -1 so they can be masked during evaluation.
+    Converting blanks to 0 would treat missing information as negative, which is wrong.
+    """
     if pd.isna(value):
-        return 0 if not keep_uncertain else -1
+        return -1  # ALWAYS convert blanks to -1 (will be masked during evaluation)
     if isinstance(value, (int, float)):
         if keep_uncertain and value == -1:
             return -1
@@ -73,10 +82,13 @@ def create_manifest_5k(
         output_csv: Output manifest CSV
         keep_uncertain: If True, keep -1 values (three-class mode)
     """
+    # ALWAYS keep -1 for uncertain and blanks (will be masked during evaluation)
+    # This ensures blanks and uncertain are both treated as -1 and masked
+    keep_uncertain = True
     print("=" * 80)
-    mode_str = "THREE-CLASS (-1/0/1)" if keep_uncertain else "BINARY (0/1)"
-    print(f"CREATING PHASE-A MANIFEST FOR 5K IMAGES [{mode_str}]")
+    print(f"CREATING PHASE-A MANIFEST FOR 5K IMAGES [THREE-CLASS (-1/0/1)]")
     print("=" * 80)
+    print("⚠️  Note: Blanks (NaN) → -1, Uncertain (-1) → -1 (both will be masked during evaluation)")
     
     # Load CheXagent CSV to get image list
     print(f"\n📥 Loading CheXagent CSV: {chexagent_csv}")
@@ -121,6 +133,58 @@ def create_manifest_5k(
         except Exception as e:
             print(f"⚠️  Could not normalize nested 'chexpert' column: {e}. Proceeding without flattening; labels may be missing.")
     
+    # Fix: Fetch missing labels (Cardiomegaly, Atelectasis) from mimic-cxr CSV
+    missing_labels = [label for label in CHEXPERT13 if label not in phaseA_df.columns]
+    if missing_labels:
+        print(f"\n🔧 Fetching {len(missing_labels)} missing labels from mimic-cxr CSV: {missing_labels}")
+        
+        # Try to find mimic-cxr CSV
+        mimic_csv_paths = [
+            project_root / "files" / "mimic-cxr-2.0.0-chexpert.csv",
+            project_root.parent / "radiology_report" / "files" / "mimic-cxr-2.0.0-chexpert.csv",
+            Path("../radiology_report/files/mimic-cxr-2.0.0-chexpert.csv"),
+            Path("files/mimic-cxr-2.0.0-chexpert.csv"),
+        ]
+        
+        mimic_csv = None
+        for path in mimic_csv_paths:
+            if path.exists():
+                mimic_csv = path
+                break
+        
+        if mimic_csv and mimic_csv.exists():
+            print(f"   Loading: {mimic_csv}")
+            mimic_df = pd.read_csv(mimic_csv)
+            
+            # Ensure study_id is string in both DataFrames
+            if "study_id" in phaseA_df.columns:
+                phaseA_df["study_id"] = phaseA_df["study_id"].astype(str)
+            mimic_df["study_id"] = mimic_df["study_id"].astype(str)
+            
+            # Merge missing labels
+            for label in missing_labels:
+                if label in mimic_df.columns:
+                    # Merge on study_id
+                    merge_df = mimic_df[["study_id", label]].copy()
+                    phaseA_df = phaseA_df.merge(
+                        merge_df,
+                        on="study_id",
+                        how="left",
+                        suffixes=("", "_mimic")
+                    )
+                    # Fill missing values with -1 (uncertain) or 0 (negative)
+                    if label not in phaseA_df.columns:
+                        phaseA_df[label] = phaseA_df[f"{label}_mimic"]
+                    else:
+                        # If already exists but has NaN, fill from mimic
+                        phaseA_df[label] = phaseA_df[label].fillna(phaseA_df[f"{label}_mimic"])
+                    phaseA_df = phaseA_df.drop(columns=[f"{label}_mimic"], errors="ignore")
+                    print(f"   ✅ Fetched {label} from mimic-cxr CSV")
+                else:
+                    print(f"   ⚠️  {label} not found in mimic-cxr CSV either")
+        else:
+            print(f"   ⚠️  Could not find mimic-cxr CSV. Missing labels will be filled with 0")
+    
     # Match filenames
     matched = phaseA_df[phaseA_df["filename"].isin(chex_filenames)].copy()
     print(f"\n✅ Matched {len(matched)} images from phaseA manifest")
@@ -137,8 +201,9 @@ def create_manifest_5k(
     
     for label in CHEXPERT13:
         if label in matched.columns:
-            # Normalize
-            matched[label] = matched[label].apply(lambda x: normalize_label(x, keep_uncertain))
+            # Normalize: blanks (NaN) → -1, uncertain (-1) → -1, negative (0) → 0, positive (1) → 1
+            # All blanks and uncertain will be -1 and masked during evaluation
+            matched[label] = matched[label].apply(lambda x: normalize_label(x, keep_uncertain=True))
             # Count
             for val in [-1, 0, 1]:
                 count = (matched[label] == val).sum()

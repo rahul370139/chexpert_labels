@@ -1,7 +1,0 @@
-metric,value
-macro_precision_certain_only,0.03290826820238585
-macro_recall_certain_only,0.017532325224632918
-macro_f1_certain_only,0.02287675150128682
-macro_precision_binary_mode,0.03290826820238585
-macro_recall_binary_mode,0.013205678441729944
-macro_f1_binary_mode,0.018847920838732476

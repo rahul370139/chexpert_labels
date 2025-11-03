@@ -1,0 +1,20 @@
+{
+  "n_train": 4659,
+  "embedding_dim": 1024,
+  "trained_labels": [
+    "Atelectasis",
+    "Cardiomegaly",
+    "Consolidation",
+    "Edema",
+    "Enlarged Cardiomediastinum",
+    "Fracture",
+    "Lung Lesion",
+    "Lung Opacity",
+    "Pleural Effusion",
+    "Pleural Other",
+    "Pneumonia",
+    "Pneumothorax",
+    "Support Devices"
+  ],
+  "skipped_labels": []
+}

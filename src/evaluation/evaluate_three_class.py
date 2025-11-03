@@ -80,34 +80,43 @@ def evaluate_three_class(
             print(f"⚠️  Skipping {label}: missing columns (pred='{pred_col}', gt='{gt_col}')")
             continue
         
-        y_pred = merged[pred_col].astype(int).values
-        y_true_raw = merged[gt_col].astype(int).values
+        y_pred = merged[pred_col]
+        y_true_raw = merged[gt_col]
+        
+        # Handle NaN (blanks) and -1 (uncertain) in ground truth
+        # Convert to numeric, preserving -1, 0, 1, and NaN
+        y_true_raw = pd.to_numeric(y_true_raw, errors='coerce')
+        y_pred = pd.to_numeric(y_pred, errors='coerce')
+        
+        # Convert to numpy arrays
+        y_true_raw = y_true_raw.values
+        y_pred = y_pred.values
         
         # Detect if predictions are 3-class (-1/0/1) or binary (0/1)
-        has_three_class_preds = (y_pred == -1).any()
+        pred_not_nan = ~np.isnan(y_pred)
+        has_three_class_preds = pred_not_nan.any() and (y_pred[pred_not_nan] == -1).any()
         
-        # For binary mode evaluation: convert to 0/1
-        y_pred_bin = (y_pred > 0).astype(int)
+        # For binary mode evaluation: convert to 0/1 (treat -1 as 0)
+        y_pred_bin = np.where(y_pred > 0, 1, 0).astype(int)
         
-        # For 3-class evaluation: use predictions as-is if they're 3-class
+        # Count blanks (NaN) and uncertain (-1) in ground truth
+        blank_count = np.isnan(y_true_raw).sum()
+        uncertain_count = ((y_true_raw == -1) & ~np.isnan(y_true_raw)).sum()
+        certain_count = len(y_true_raw) - blank_count - uncertain_count
+        
+        # Mode 1: Only evaluate on certain labels (GT = 0 or 1, ignore -1 and blanks)
+        # Mask out: -1 (uncertain), NaN (blanks), and NaN predictions
+        certain_mask_gt = (~np.isnan(y_true_raw)) & (y_true_raw != -1)
         if has_three_class_preds:
-            # Predictions are 3-class, evaluate certain-only
-            certain_mask_pred = (y_pred != -1)
+            certain_mask_pred = ~np.isnan(y_pred) & (y_pred != -1)
         else:
-            # Predictions are binary, only evaluate where GT is certain
-            certain_mask_pred = np.ones(len(y_pred), dtype=bool)
+            certain_mask_pred = ~np.isnan(y_pred)
         
-        # Count uncertain (-1) in ground truth
-        uncertain_count = (y_true_raw == -1).sum()
-        certain_count = len(y_true_raw) - uncertain_count
-        
-        # Mode 1: Only evaluate on certain labels (GT = 0 or 1, ignore -1)
-        # If predictions are 3-class, also ignore -1 predictions
-        certain_mask = (y_true_raw != -1) & certain_mask_pred
+        certain_mask = certain_mask_gt & certain_mask_pred
         if certain_mask.sum() > 0:
-            y_true_certain = y_true_raw[certain_mask]
+            y_true_certain = y_true_raw[certain_mask].astype(int)
             if has_three_class_preds:
-                y_pred_certain = y_pred[certain_mask]  # Use 3-class predictions directly
+                y_pred_certain = y_pred[certain_mask].astype(int)  # Use 3-class predictions directly
             else:
                 y_pred_certain = y_pred_bin[certain_mask]  # Binary predictions
             
@@ -119,20 +128,28 @@ def evaluate_three_class(
             p_certain = r_certain = f1_certain = acc_certain = np.nan
         
         # Mode 2: Treat -1 as 0 for comparison (binary evaluation)
-        y_true_binary = (y_true_raw == 1).astype(int)
-        p_binary = precision_score(y_true_binary, y_pred_bin, zero_division=0)
-        r_binary = recall_score(y_true_binary, y_pred_bin, zero_division=0)
-        f1_binary = f1_score(y_true_binary, y_pred_bin, zero_division=0)
-        acc_binary = accuracy_score(y_true_binary, y_pred_bin)
+        # Mask out blanks (NaN) - don't evaluate on them
+        binary_mask = ~np.isnan(y_true_raw)
+        if binary_mask.sum() > 0:
+            y_true_binary = np.where(y_true_raw[binary_mask] == 1, 1, 0).astype(int)
+            y_pred_binary = y_pred_bin[binary_mask]
+            
+            p_binary = precision_score(y_true_binary, y_pred_binary, zero_division=0)
+            r_binary = recall_score(y_true_binary, y_pred_binary, zero_division=0)
+            f1_binary = f1_score(y_true_binary, y_pred_binary, zero_division=0)
+            acc_binary = accuracy_score(y_true_binary, y_pred_binary)
+        else:
+            p_binary = r_binary = f1_binary = acc_binary = np.nan
         
-        # Count uncertain predictions
-        pred_uncertain = (y_pred == -1).sum() if has_three_class_preds else 0
+        # Count uncertain predictions and blanks
+        pred_uncertain = ((~np.isnan(y_pred)) & (y_pred == -1)).sum() if has_three_class_preds else 0
         
         results.append({
             "label": label,
-            "uncertain_gt_count": uncertain_count,
+            "blank_gt_count": int(blank_count),
+            "uncertain_gt_count": int(uncertain_count),
             "uncertain_pred_count": int(pred_uncertain),
-            "certain_count": certain_count,
+            "certain_count": int(certain_count),
             "precision_certain_only": p_certain,
             "recall_certain_only": r_certain,
             "f1_certain_only": f1_certain,
@@ -144,47 +161,71 @@ def evaluate_three_class(
         })
         
         print(f"\n  {label}:")
-        print(f"    Uncertain in GT: {uncertain_count} ({uncertain_count/len(merged)*100:.1f}%)")
+        print(f"    Blanks in GT: {blank_count} ({blank_count/len(merged)*100:.1f}%)")
+        print(f"    Uncertain (-1) in GT: {uncertain_count} ({uncertain_count/len(merged)*100:.1f}%)")
+        print(f"    Certain (0/1) in GT: {certain_count} ({certain_count/len(merged)*100:.1f}%)")
         if has_three_class_preds:
-            print(f"    Uncertain in Pred: {pred_uncertain} ({pred_uncertain/len(merged)*100:.1f}%)")
-        print(f"    Certain only - P: {p_certain:.3f}, R: {r_certain:.3f}, F1: {f1_certain:.3f}")
-        print(f"    Binary mode (-1→0) - P: {p_binary:.3f}, R: {r_binary:.3f}, F1: {f1_binary:.3f}")
+            print(f"    Uncertain (-1) in Pred: {pred_uncertain} ({pred_uncertain/len(merged)*100:.1f}%)")
+        print(f"    Certain-only (masked) - P: {p_certain:.3f}, R: {r_certain:.3f}, F1: {f1_certain:.3f}, Acc: {acc_certain:.3f}")
+        print(f"    Binary mode (-1→0, masked) - P: {p_binary:.3f}, R: {r_binary:.3f}, F1: {f1_binary:.3f}, Acc: {acc_binary:.3f}")
     
     # Overall metrics
     results_df = pd.DataFrame(results)
     
-    macro_p_certain = results_df["precision_certain_only"].mean()
-    macro_r_certain = results_df["recall_certain_only"].mean()
-    macro_f1_certain = results_df["f1_certain_only"].mean()
+    # Compute macro averages (ignore NaN)
+    macro_p_certain = results_df["precision_certain_only"].dropna().mean()
+    macro_r_certain = results_df["recall_certain_only"].dropna().mean()
+    macro_f1_certain = results_df["f1_certain_only"].dropna().mean()
+    macro_acc_certain = results_df["accuracy_certain_only"].dropna().mean()
     
-    macro_p_binary = results_df["precision_binary_mode"].mean()
-    macro_r_binary = results_df["recall_binary_mode"].mean()
-    macro_f1_binary = results_df["f1_binary_mode"].mean()
+    macro_p_binary = results_df["precision_binary_mode"].dropna().mean()
+    macro_r_binary = results_df["recall_binary_mode"].dropna().mean()
+    macro_f1_binary = results_df["f1_binary_mode"].dropna().mean()
+    macro_acc_binary = results_df["accuracy_binary_mode"].dropna().mean()
     
-    print(f"\n📊 Overall Metrics:")
-    print(f"   Certain-only evaluation:")
-    print(f"     Macro P: {macro_p_certain:.3f}, R: {macro_r_certain:.3f}, F1: {macro_f1_certain:.3f}")
-    print(f"   Binary mode (uncertain→0):")
-    print(f"     Macro P: {macro_p_binary:.3f}, R: {macro_r_binary:.3f}, F1: {macro_f1_binary:.3f}")
+    print(f"\n📊 Overall Macro Metrics:")
+    print(f"   Certain-only evaluation (masked -1 and blanks):")
+    print(f"     Precision: {macro_p_certain:.3f}, Recall: {macro_r_certain:.3f}, F1: {macro_f1_certain:.3f}, Accuracy: {macro_acc_certain:.3f}")
+    print(f"   Binary mode (-1→0, masked blanks):")
+    print(f"     Precision: {macro_p_binary:.3f}, Recall: {macro_r_binary:.3f}, F1: {macro_f1_binary:.3f}, Accuracy: {macro_acc_binary:.3f}")
     
-    # Recommendation
-    print(f"\n💡 Recommendation:")
-    p_diff = macro_p_certain - macro_p_binary
-    f1_diff = macro_f1_certain - macro_f1_binary
+    # Recommendation based on best accuracy, precision, recall, F1
+    print(f"\n💡 Recommendation (Best Performance):")
+    metrics_certain = {
+        "precision": macro_p_certain,
+        "recall": macro_r_certain,
+        "f1": macro_f1_certain,
+        "accuracy": macro_acc_certain,
+    }
+    metrics_binary = {
+        "precision": macro_p_binary,
+        "recall": macro_r_binary,
+        "f1": macro_f1_binary,
+        "accuracy": macro_acc_binary,
+    }
     
-    if p_diff > 0.10 and f1_diff > 0.05:
-        print(f"   ✅ USE THREE-CLASS MODE (certain-only evaluation)")
-        print(f"   - Precision is {p_diff:.3f} higher than binary mode")
-        print(f"   - F1 is {f1_diff:.3f} higher")
-        print(f"   - Better clinical interpretation (uncertainty is meaningful)")
-    elif p_diff > 0.05:
-        print(f"   ✅ PREFER THREE-CLASS MODE")
-        print(f"   - Precision is {p_diff:.3f} higher (reduces false positives)")
-        print(f"   - Better for clinical settings where uncertainty matters")
+    wins_certain = sum(1 for m in ["precision", "recall", "f1", "accuracy"] 
+                       if metrics_certain[m] > metrics_binary[m])
+    wins_binary = 4 - wins_certain
+    
+    if wins_certain > wins_binary:
+        print(f"   ✅ USE CERTAIN-ONLY MODE (masks -1 and blanks)")
+        print(f"   - Wins {wins_certain}/4 metrics: P={macro_p_certain:.3f} vs {macro_p_binary:.3f}, "
+              f"R={macro_r_certain:.3f} vs {macro_r_binary:.3f}, "
+              f"F1={macro_f1_certain:.3f} vs {macro_f1_binary:.3f}, "
+              f"Acc={macro_acc_certain:.3f} vs {macro_acc_binary:.3f}")
+        print(f"   - Better clinical interpretation (uncertainty/blanks excluded from evaluation)")
+    elif wins_binary > wins_certain:
+        print(f"   ✅ USE BINARY MODE (-1→0, masks blanks)")
+        print(f"   - Wins {wins_binary}/4 metrics: P={macro_p_binary:.3f} vs {macro_p_certain:.3f}, "
+              f"R={macro_r_binary:.3f} vs {macro_r_certain:.3f}, "
+              f"F1={macro_f1_binary:.3f} vs {macro_f1_certain:.3f}, "
+              f"Acc={macro_acc_binary:.3f} vs {macro_acc_certain:.3f}")
+        print(f"   - Simpler interpretation (uncertain treated as negative)")
     else:
-        print(f"   ⚖️  BOTH MODES SIMILAR")
+        print(f"   ⚖️  BOTH MODES SIMILAR (tied {wins_certain}-{wins_binary})")
         print(f"   - Use binary for simplicity")
-        print(f"   - Use 3-class if uncertainty interpretation is important")
+        print(f"   - Use certain-only if uncertainty interpretation is important")
     
     # Save
     output_csv.parent.mkdir(parents=True, exist_ok=True)
